@@ -4,11 +4,9 @@ __pycache__/
 *$py.class
 *.so
 .venv/
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
+.env/
+.env.bak/
+.ruff_cache/
 
 # Data and Logs
 data/
