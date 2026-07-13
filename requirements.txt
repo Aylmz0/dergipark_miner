@@ -1,0 +1,6 @@
+httpx
+loguru
+opendataloader-pdf[hybrid]
+polars
+selectolax
+tqdm

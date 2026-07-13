@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Data and Logs
+data/
+*.log
+checkpoint.json
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Git
+.git/
