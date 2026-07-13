@@ -6,6 +6,7 @@ Faz 2-5 boyunca kullanılacak yardımcılar.
 import asyncio
 import functools
 import time
+from pathlib import Path
 from typing import Callable
 
 from loguru import logger
@@ -59,3 +60,28 @@ def retry(
         return sync_wrapper
 
     return decorator
+
+
+_logger_ready = False
+
+
+def setup_logger() -> None:
+    """loguru'yu yapılandırır: hatalar data/error.log'a (rotation), konsola bilgi seviyesinde.
+
+    Birden fazla çağrıda tekrar handler eklenmez (guard).
+    """
+    global _logger_ready
+    if _logger_ready:
+        return
+
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+
+    logger.add(
+        data_dir / "error.log",
+        level="ERROR",
+        rotation="10 MB",
+        backtrace=True,
+        diagnose=True,
+    )
+    _logger_ready = True
