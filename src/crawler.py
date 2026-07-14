@@ -2,6 +2,7 @@
 
 import asyncio
 import random
+import re
 
 import httpx
 from selectolax.parser import HTMLParser
@@ -132,3 +133,69 @@ async def harvest_all_journals(
 
     await asyncio.gather(*(_harvest_one(name, i) for i, name in enumerate(shortnames, 1)))
     return results
+
+
+def _node_text(node) -> str:
+    """selectolax, CDATA icerigini HTML yorumuna cevirir; bu yuzden serialized HTML
+    uzerinden etiketleri ve CDATA isaretlerini temizleyip metni cikarir."""
+    html = node.html or ""
+    inner = re.sub(r"^<[^<>]*>", "", html)
+    inner = re.sub(r"<[^<>]*>$", "", inner)
+    inner = inner.replace("<!--[CDATA[", "").replace("]]-->", "")
+    return inner.strip()
+
+
+def parse_article_metadata(xml_text: str) -> dict:
+    """Tek bir OAI kaydinin (oai_dc) ham XML'inden makale metadatasini cikarir.
+
+    Donus alanlari: title, doi, authors (list[str]), publication_date, journal_shortname.
+    Alan bulunamazsa "" veya [] doner; hicbir zaman crash yapmaz.
+    GÖREV 5'in dondurdugu ham OAI XML seklıyle uyumludur.
+    """
+    tree = HTMLParser(xml_text)
+    titles: list[str] = []
+    creators: list[str] = []
+    dates: list[str] = []
+    identifiers: list[str] = []
+    relations: list[str] = []
+
+    for node in tree.css("*"):
+        tag = node.tag
+        if not tag or not tag.startswith("dc:"):
+            continue
+        text = _node_text(node)
+        if tag == "dc:title":
+            titles.append(text)
+        elif tag == "dc:creator":
+            creators.append(text)
+        elif tag == "dc:date":
+            dates.append(text)
+        elif tag == "dc:identifier":
+            identifiers.append(text)
+        elif tag == "dc:relation":
+            relations.append(text)
+
+    doi = ""
+    for ident in identifiers:
+        m = re.search(r"10\.\d{4,9}/[^\s\"'<]+", ident)
+        if m:
+            doi = m.group(0)
+            break
+        if "doi.org/" in ident:
+            doi = ident.split("doi.org/")[-1].strip("/")
+            break
+
+    journal_shortname = ""
+    for rel in relations:
+        m = re.search(r"/pub/([^/\s]+)", rel)
+        if m:
+            journal_shortname = m.group(1)
+            break
+
+    return {
+        "title": titles[0] if titles else "",
+        "doi": doi,
+        "authors": [a for a in creators if a],
+        "publication_date": dates[0] if dates else "",
+        "journal_shortname": journal_shortname,
+    }
