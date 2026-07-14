@@ -5,6 +5,7 @@ Faz 2-5 boyunca kullanılacak yardımcılar.
 
 import asyncio
 import functools
+import inspect
 import time
 from pathlib import Path
 from typing import Callable
@@ -55,7 +56,7 @@ def retry(
             assert last_exc is not None
             raise last_exc
 
-        if asyncio.iscoroutinefunction(func):
+        if inspect.iscoroutinefunction(func):
             return async_wrapper
         return sync_wrapper
 
