@@ -7,8 +7,8 @@ import asyncio
 import functools
 import inspect
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from loguru import logger
 
@@ -32,9 +32,7 @@ def retry(
                     return func(*args, **kwargs)
                 except exceptions as exc:
                     last_exc = exc
-                    logger.warning(
-                        "Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc
-                    )
+                    logger.warning("Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc)
                     if attempt < max_attempts:
                         time.sleep(backoff * (2 ** (attempt - 1)))
             assert last_exc is not None
@@ -48,9 +46,7 @@ def retry(
                     return await func(*args, **kwargs)
                 except exceptions as exc:
                     last_exc = exc
-                    logger.warning(
-                        "Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc
-                    )
+                    logger.warning("Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc)
                     if attempt < max_attempts:
                         await asyncio.sleep(backoff * (2 ** (attempt - 1)))
             assert last_exc is not None
