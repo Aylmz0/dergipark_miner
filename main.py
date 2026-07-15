@@ -19,7 +19,7 @@ from src.crawler import (  # noqa: E402
     harvest_all_journals,
     parse_article_metadata,
 )
-from src.enrich import enrich_all_articles  # noqa: E402
+from src.enrich import enrich_all_articles, enrich_existing_citations  # noqa: E402
 from src.storage import init_db, insert_article  # noqa: E402
 from src.utils import setup_logger  # noqa: E402
 
@@ -84,6 +84,18 @@ async def run():
             )
         except Exception:
             logger.exception("Zenginlestirme hatasi")
+
+        # 6. Citation DOI/baglanti zenginlestirme
+        try:
+            result2 = await enrich_existing_citations(client, conn, concurrency=3, batch_size=100)
+            logger.info(
+                "Citation zenginlestirme: enriched={}, linked={}, failed={}",
+                result2["enriched"],
+                result2["linked_to_our_db"],
+                result2["failed"],
+            )
+        except Exception:
+            logger.exception("Citation zenginlestirme hatasi")
 
     conn.close()
     logger.info("=== dergipark-miner bitti ===")
