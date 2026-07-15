@@ -59,7 +59,7 @@ async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int 
     for page in range(1, max_pages + 1):
         url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
         logger.info("Dergi listesi cekiliyor: {}", url)
-        resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+        resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
         resp.raise_for_status()
         page_slugs = _extract_slugs(resp.text)
         logger.info("Sayfa {}: {} dergi bulundu", page, len(page_slugs))
@@ -73,7 +73,7 @@ async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int 
 @retry(max_attempts=3, backoff=1.0)
 async def _fetch_oai(client: httpx.AsyncClient, url: str) -> str:
     """Tek bir OAI HTTP GET istegini retry ile çeker, ham XML gövdesini döndürür."""
-    resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+    resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
     resp.raise_for_status()
     return resp.text
 
