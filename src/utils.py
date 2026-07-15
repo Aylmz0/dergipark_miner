@@ -14,14 +14,27 @@ from loguru import logger
 
 
 def retry(
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     backoff: float = 1.0,
     exceptions: tuple[type[BaseException], ...] = (Exception,),
+    rate_limit_backoff: float = 5.0,
 ):
     """Hem senkron hem async fonksiyonlara takılabilen yeniden deneme dekoratörü.
 
     Başarısız denemeler arasında üstel bekleme (backoff * 2**deneme) yapar.
+    HTTP 429 (Too Many Requests) hatalarinda daha uzun bekleme kullanir.
     """
+
+    def _is_rate_limit(exc: BaseException) -> bool:
+        msg = str(exc)
+        if "429" in msg or "Too Many Requests" in msg:
+            return True
+        code = getattr(exc, "status_code", None)
+        return code == 429
+
+    def _wait_time(exc: BaseException, attempt: int) -> float:
+        base = rate_limit_backoff if _is_rate_limit(exc) else backoff
+        return base * (2 ** (attempt - 1))
 
     def decorator(func: Callable):
         @functools.wraps(func)
@@ -32,9 +45,13 @@ def retry(
                     return func(*args, **kwargs)
                 except exceptions as exc:
                     last_exc = exc
-                    logger.warning("Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc)
+                    wait = _wait_time(exc, attempt)
+                    logger.warning(
+                        "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
+                        attempt, max_attempts, exc, wait,
+                    )
                     if attempt < max_attempts:
-                        time.sleep(backoff * (2 ** (attempt - 1)))
+                        time.sleep(wait)
             assert last_exc is not None
             raise last_exc
 
@@ -46,9 +63,13 @@ def retry(
                     return await func(*args, **kwargs)
                 except exceptions as exc:
                     last_exc = exc
-                    logger.warning("Deneme {}/{} basarisiz: {}", attempt, max_attempts, exc)
+                    wait = _wait_time(exc, attempt)
+                    logger.warning(
+                        "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
+                        attempt, max_attempts, exc, wait,
+                    )
                     if attempt < max_attempts:
-                        await asyncio.sleep(backoff * (2 ** (attempt - 1)))
+                        await asyncio.sleep(wait)
             assert last_exc is not None
             raise last_exc
 

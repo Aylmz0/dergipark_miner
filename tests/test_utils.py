@@ -92,7 +92,7 @@ def test_setup_logger_creates_error_log(tmp_path, monkeypatch):
 
 
 def test_setup_logger_guard(tmp_path, monkeypatch):
-    """İkinci çağrıda tekrar handler eklenmemeli (guard)."""
+    """Ikinci cagirda tekrar handler eklenmemeli (guard)."""
     monkeypatch.chdir(tmp_path)
     utils._logger_ready = False
 
@@ -100,3 +100,23 @@ def test_setup_logger_guard(tmp_path, monkeypatch):
     setup_logger()
 
     assert Path("data/error.log").exists()
+
+
+def test_retry_429_uses_longer_backoff():
+    """429 iceren hatalarda rate_limit_backoff kullanilir."""
+    call_count = 0
+
+    class RateLimitError(Exception):
+        def __init__(self, msg="429 Too Many Requests"):
+            super().__init__(msg)
+
+    @retry(max_attempts=3, backoff=0.0, rate_limit_backoff=0.0, exceptions=(Exception,))
+    def rate_limited():
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise RateLimitError("429 Too Many Requests")
+        return "ok"
+
+    assert rate_limited() == "ok"
+    assert call_count == 3
