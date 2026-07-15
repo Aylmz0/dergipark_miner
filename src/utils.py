@@ -18,19 +18,38 @@ def retry(
     backoff: float = 1.0,
     exceptions: tuple[type[BaseException], ...] = (Exception,),
     rate_limit_backoff: float = 5.0,
+    retry_on_status: tuple[int, ...] = (429, 500, 502, 503, 504),
 ):
-    """Hem senkron hem async fonksiyonlara takılabilen yeniden deneme dekoratörü.
+    """Hem senkron hem async fonksiyonlara takilabilen yeniden deneme dekoratoru.
 
-    Başarısız denemeler arasında üstel bekleme (backoff * 2**deneme) yapar.
-    HTTP 429 (Too Many Requests) hatalarinda daha uzun bekleme kullanir.
+    Basarisiz denemeler arasinda ustel bekleme (backoff * 2**deneme) yapar.
+    HTTP 429 hatalarinda daha uzun bekleme kullanir.
+    4xx istemci hatalari (404, 400, 401, 403) yeniden denenmez; hemen firlatilir.
+    retry_on_status ile yeniden denenecek HTTP durum kodlari belirlenir.
     """
 
-    def _is_rate_limit(exc: BaseException) -> bool:
-        msg = str(exc)
-        if "429" in msg or "Too Many Requests" in msg:
-            return True
+    def _get_status_code(exc: BaseException) -> int | None:
         code = getattr(exc, "status_code", None)
-        return code == 429
+        if isinstance(code, int):
+            return code
+        msg = str(exc)
+        for pattern in ("429", "404", "500", "502", "503", "504"):
+            if pattern in msg:
+                return int(pattern)
+        return None
+
+    def _is_rate_limit(exc: BaseException) -> bool:
+        code = _get_status_code(exc)
+        if code == 429:
+            return True
+        msg = str(exc)
+        return "429" in msg or "Too Many Requests" in msg
+
+    def _should_retry(exc: BaseException) -> bool:
+        code = _get_status_code(exc)
+        if code is None:
+            return True  # status code yoksa mevcut davranis (retry)
+        return code in retry_on_status
 
     def _wait_time(exc: BaseException, attempt: int) -> float:
         base = rate_limit_backoff if _is_rate_limit(exc) else backoff
@@ -44,6 +63,9 @@ def retry(
                 try:
                     return func(*args, **kwargs)
                 except exceptions as exc:
+                    if not _should_retry(exc):
+                        logger.debug("Deneme {}/{}: hemen firlatiliyor (retry edilmeyecek): {}", attempt, max_attempts, exc)
+                        raise
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
                     logger.warning(
@@ -62,6 +84,9 @@ def retry(
                 try:
                     return await func(*args, **kwargs)
                 except exceptions as exc:
+                    if not _should_retry(exc):
+                        logger.debug("Deneme {}/{}: hemen firlatiliyor (retry edilmeyecek): {}", attempt, max_attempts, exc)
+                        raise
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
                     logger.warning(

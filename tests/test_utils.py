@@ -120,3 +120,51 @@ def test_retry_429_uses_longer_backoff():
 
     assert rate_limited() == "ok"
     assert call_count == 3
+
+
+def test_retry_404_raises_immediately():
+    """404 hatasi hemen firlatilir, deneme yapilmaz."""
+    call_count = 0
+
+    class NotFoundError(Exception):
+        def __init__(self, msg="404 Not Found"):
+            super().__init__(msg)
+            self.status_code = 404
+
+    @retry(max_attempts=5, backoff=0.0, exceptions=(Exception,))
+    def not_found():
+        nonlocal call_count
+        call_count += 1
+        raise NotFoundError()
+
+    try:
+        not_found()
+    except NotFoundError:
+        pass
+    else:
+        raise AssertionError("Hata firlatilmadi")
+    assert call_count == 1  # sadece 1 deneme, hemen firlatti
+
+
+def test_retry_500_retries():
+    """500 hatasi yeniden denenir."""
+    call_count = 0
+
+    class ServerError(Exception):
+        def __init__(self, msg="500 Internal Server Error"):
+            super().__init__(msg)
+            self.status_code = 500
+
+    @retry(max_attempts=3, backoff=0.0, exceptions=(Exception,))
+    def server_fail():
+        nonlocal call_count
+        call_count += 1
+        raise ServerError()
+
+    try:
+        server_fail()
+    except ServerError:
+        pass
+    else:
+        raise AssertionError("Hata firlatilmadi")
+    assert call_count == 3  # 3 deneme yapildi
