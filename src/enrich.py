@@ -146,7 +146,7 @@ async def enrich_all_articles(
                 logger.exception("Makale {} zenginlestirilemedi", article_id)
 
     tasks = [_process(aid, doi or "", title or "") for aid, doi, title in rows]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     logger.info(
         "Zenginlestirme tamamlandi: enriched={}, citations={}, failed={}",
@@ -224,7 +224,7 @@ async def enrich_existing_citations(
                 logger.exception("Citation {} zenginlestirilemedi", citation_id)
 
     tasks = [_process(cid, oid) for cid, oid in rows]
-    await asyncio.gather(*tasks)
+    await asyncio.gather(*tasks, return_exceptions=True)
 
     logger.info(
         "Citation zenginlestirme tamamlandi: enriched={}, linked={}, failed={}",
