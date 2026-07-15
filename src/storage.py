@@ -54,6 +54,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             id                   INTEGER PRIMARY KEY AUTOINCREMENT,
             citing_article_id   INTEGER NOT NULL,
             cited_article_id    INTEGER,
+            cited_openalex_id   TEXT,
             cited_doi           TEXT,
             cited_title         TEXT,
             created_at          TEXT DEFAULT (datetime('now')),
@@ -67,6 +68,11 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
     if "oai_identifier" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN oai_identifier TEXT")
+
+    # cited_openalex_id kolonu eksik olabilir; ekle
+    cit_cols = {row[1] for row in conn.execute("PRAGMA table_info(citations)").fetchall()}
+    if "cited_openalex_id" not in cit_cols:
+        conn.execute("ALTER TABLE citations ADD COLUMN cited_openalex_id TEXT")
 
     conn.commit()
     return conn
@@ -172,3 +178,44 @@ def _write_authors(conn: sqlite3.Connection, article_id: int, authors: list) -> 
             "INSERT INTO authors (article_id, name) VALUES (?, ?)",
             (article_id, name),
         )
+
+
+def insert_citation(
+    conn: sqlite3.Connection,
+    *,
+    citing_article_id: int,
+    cited_openalex_id: str | None = None,
+    cited_doi: str | None = None,
+    cited_title: str | None = None,
+) -> int:
+    """Citations tablosuna atif yazar; ayni (citing, cited_openalex) tekrarlanmaz.
+
+    - Ayni citing_article_id + cited_openalex_id kombinasyonu varsa atlar (dedup).
+    - cited_openalex_id None veya bos string ise dedup atlanmaz; teorik olarak ayni
+      makale birden fazla kez tanimlanabilir (farkli openalex id yoksa).
+    - Donus: inserted row id'si veya mevcut row id'si.
+    """
+    if citing_article_id is None:
+        return -1
+
+    openalex_id = (cited_openalex_id or "").strip()
+    doi = (cited_doi or "").strip()
+    title = (cited_title or "").strip()
+
+    # Dedup: ayni citing + cited_openalex_id varsa mevcut satiri dondur
+    if openalex_id:
+        row = conn.execute(
+            "SELECT id FROM citations WHERE citing_article_id = ? AND cited_openalex_id = ?",
+            (citing_article_id, openalex_id),
+        ).fetchone()
+        if row:
+            return row[0]
+
+    cur = conn.execute(
+        """
+        INSERT INTO citations (citing_article_id, cited_article_id, cited_openalex_id, cited_doi, cited_title)
+        VALUES (?, NULL, ?, ?, ?)
+        """,
+        (citing_article_id, openalex_id or None, doi or None, title or None),
+    )
+    return cur.lastrowid
