@@ -45,6 +45,26 @@ async def fetch_openalex_work(client: httpx.AsyncClient, *, doi: str = "", title
     return results[0] if results else None
 
 
+@retry(max_attempts=3, backoff=1.0)
+async def fetch_openalex_work_by_id(client: httpx.AsyncClient, work_id: str) -> dict | None:
+    """OpenAlex'den bir work id'si (Wxxxx) ile doi ve title bilgisini ceker.
+
+    Donus: {"doi": "...", "title": "..."} veya None.
+    """
+    url = f"{OPENALEX_BASE}/works/{work_id}"
+    params = {"mailto": OPENALEX_MAIL}
+    headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "application/json"}
+
+    logger.debug("OpenAlex fetch by id: url={}", url)
+    r = await client.get(url, params=params, headers=headers)
+    r.raise_for_status()
+    data = r.json()
+
+    if "doi" not in data and "title" not in data:
+        return None
+    return {"doi": data.get("doi") or "", "title": data.get("title") or ""}
+
+
 async def enrich_article_citations(
     client: httpx.AsyncClient,
     article_id: int,

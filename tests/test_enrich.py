@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from src.enrich import enrich_article_citations, fetch_openalex_work
+from src.enrich import enrich_article_citations, fetch_openalex_work, fetch_openalex_work_by_id
 from src.storage import init_db, insert_article, insert_citation
 
 
@@ -101,6 +101,51 @@ def test_fetch_openalex_work_retry_on_error():
     result = asyncio.run(fetch_openalex_work(client, doi="10.1000/test"))
     assert result is not None
     assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# fetch_openalex_work_by_id tests
+# ---------------------------------------------------------------------------
+
+def test_fetch_openalex_work_by_id_found():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "https://openalex.org/W123",
+            "doi": "https://doi.org/10.1000/test",
+            "title": "Test Title",
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(fetch_openalex_work_by_id(client, "W123"))
+    assert result is not None
+    assert result["doi"] == "https://doi.org/10.1000/test"
+    assert result["title"] == "Test Title"
+
+
+def test_fetch_openalex_work_by_id_not_found():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="Not Found")
+
+    client = _make_client(handler)
+    try:
+        result = asyncio.run(fetch_openalex_work_by_id(client, "W999"))
+    except Exception:
+        result = None
+    assert result is None
+
+
+def test_fetch_openalex_work_by_id_empty_doi():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "https://openalex.org/W456",
+            "title": "No DOI Title",
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(fetch_openalex_work_by_id(client, "W456"))
+    assert result is not None
+    assert result["doi"] == ""
+    assert result["title"] == "No DOI Title"
 
 
 # ---------------------------------------------------------------------------
