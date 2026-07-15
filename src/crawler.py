@@ -65,7 +65,7 @@ async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int 
         logger.info("Sayfa {}: {} dergi bulundu", page, len(page_slugs))
         collected |= page_slugs
         if page < max_pages:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(random.uniform(1.0, 2.0))
 
     return sorted(collected)
 
@@ -82,15 +82,16 @@ async def harvest_all_journals(
     client: httpx.AsyncClient,
     shortnames: list[str],
     *,
-    concurrency: int = 5,
-    max_records_per_journal: int = 50,
+    concurrency: int = 1,
+    max_records_per_journal: int = 20,
+    inter_request_delay: float = 1.5,
 ) -> dict[str, list[str]]:
-    """Dergi listesindeki her dergi için OAI ListRecords ham XML'lerini asenkron toplar.
+    """Dergi listesindeki her dergi icin OAI ListRecords ham XML'lerini asenkron toplar.
 
     Donus: {short_name: [raw_oai_xml_string, ...]}  (ham XML; parse EDILMEZ).
     - asyncio.Semaphore ile eszamanlilik sinirlanir.
     - Dergi istegi utils.retry ile sarilir; kalici hatada o dergi [] ile atlanir (crash yok).
-    - Istekler arasi rastgele 0.5-1.5s bekleme ile rate-limit yapilir.
+    - inter_request_delay: istekler arasi bekleme (saniye); +/- %30 rastgelelik.
     - client disaridan alinir; fonksiyon icinde client uretmez.
     """
     setup_logger()
@@ -103,7 +104,7 @@ async def harvest_all_journals(
         nonlocal completed
         xml_pages: list[str] = []
         async with semaphore:
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(inter_request_delay * 0.7, inter_request_delay * 1.3))
             url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&metadataPrefix={OAI_METADATA_PREFIX}"
             collected_records = 0
             try:

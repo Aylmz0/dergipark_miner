@@ -218,4 +218,5 @@ def insert_citation(
         """,
         (citing_article_id, openalex_id or None, doi or None, title or None),
     )
+    conn.commit()
     return cur.lastrowid

@@ -38,18 +38,23 @@ async def run():
         headers={"User-Agent": DEFAULT_USER_AGENT},
         timeout=httpx.Timeout(60.0),
     ) as client:
-        # 2. Dergi listesini kesfet
+        # 2. Dergi listesini kesfet (kucuk batch)
         try:
-            shortnames = await fetch_journal_shortnames(client, max_pages=1)
-            logger.info("Dergi listesi: {} dergi bulundu", len(shortnames))
+            all_shortnames = await fetch_journal_shortnames(client, max_pages=1)
+            shortnames = all_shortnames[:20]  # rate-limit icin sinirli
+            logger.info("Dergi listesi: {} dergi bulundu, {} islenecek", len(all_shortnames), len(shortnames))
         except Exception:
             logger.exception("Dergi listesi cekilemedi; ornek liste kullaniyor")
             shortnames = ["ihad"]
 
-        # 3. OAI ham XML cek
+        # 3. OAI ham XML cek (dusuk hizli)
         try:
             results = await harvest_all_journals(
-                client, shortnames, concurrency=2, max_records_per_journal=20
+                client,
+                shortnames,
+                concurrency=1,
+                max_records_per_journal=10,
+                inter_request_delay=2.0,
             )
             logger.info("Harvest tamamlandi: {} dergi", len(results))
         except Exception:
