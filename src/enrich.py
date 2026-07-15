@@ -3,35 +3,44 @@
 from __future__ import annotations
 
 import httpx
+from loguru import logger
 
-from src.crawler import OPENALEX_BASE
+from src.crawler import DEFAULT_USER_AGENT, OPENALEX_BASE
 from src.storage import insert_citation
+from src.utils import retry
+
+OPENALEX_MAIL = "dergipark-miner@example.com"
 
 
+@retry(max_attempts=3, backoff=1.0)
 async def fetch_openalex_work(client: httpx.AsyncClient, *, doi: str = "", title: str = "") -> dict | None:
     """OpenAlex'den bir work JSON'u ceker.
 
-    Once DOI ile arar; DOI yoksa title ile.
+    Once DOI ile arar (dogrudan /works/https://doi.org/{doi}),
+    DOI yoksa title ile /works?search={title}.
     Bulamazsa None dondurur.
     """
-    params: dict[str, str] = {}
+    headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "application/json"}
+    params: dict[str, str] = {"mailto": OPENALEX_MAIL}
+
     if doi:
-        params["filter"] = f"doi:{doi}"
+        url = f"{OPENALEX_BASE}/works/https://doi.org/{doi}"
     elif title:
-        params["filter"] = f"title.search:{title}"
+        url = f"{OPENALEX_BASE}/works"
+        params["search"] = title
     else:
         return None
 
-    params["per_page"] = "1"
+    logger.debug("OpenAlex fetch: url={}", url)
+    r = await client.get(url, params=params, headers=headers)
+    r.raise_for_status()
+    data = r.json()
 
-    try:
-        r = await client.get(f"{OPENALEX_BASE}/works", params=params)
-        r.raise_for_status()
-        data = r.json()
-        results = data.get("results", [])
-        return results[0] if results else None
-    except Exception:
-        return None
+    # DOI ile dogrudan cekimde sonuc tek dict; search ile results listesi
+    if "id" in data:
+        return data
+    results = data.get("results", [])
+    return results[0] if results else None
 
 
 async def enrich_article_citations(
