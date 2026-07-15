@@ -8,7 +8,7 @@ import httpx
 from loguru import logger
 
 from src.crawler import DEFAULT_USER_AGENT, OPENALEX_BASE
-from src.storage import insert_citation
+from src.storage import insert_citation, resolve_citation_targets
 from src.utils import retry
 
 OPENALEX_MAIL = "dergipark-miner@example.com"
@@ -153,3 +153,81 @@ async def enrich_all_articles(
         enriched, citations_added, failed,
     )
     return {"enriched": enriched, "citations_added": citations_added, "failed": failed}
+
+
+async def enrich_existing_citations(
+    client: httpx.AsyncClient,
+    conn,
+    *,
+    concurrency: int = 3,
+    batch_size: int = 100,
+) -> dict:
+    """Mevcut citations satirlarini OpenAlex ile zenginlestirir (DOI/title cozme).
+
+    cited_openalex_id dolu ama cited_doi BOŞ olan citation'lari ceker.
+    Her biri icin fetch_openalex_work_by_id ile DOI/title bilgisini ceker,
+    citations satirini UPDATE eder, ve bizim DB'mizde eslesme varsa
+    cited_article_id'yi baglar.
+
+    Donus: {enriched: N, linked_to_our_db: K, failed: M}
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    rows = conn.execute(
+        """
+        SELECT id, cited_openalex_id FROM citations
+        WHERE cited_openalex_id IS NOT NULL AND cited_openalex_id != ''
+          AND (cited_doi IS NULL OR cited_doi = '')
+        LIMIT ?
+        """,
+        (batch_size,),
+    ).fetchall()
+
+    if not rows:
+        logger.info("Zenginlestirilecek citation yok")
+        return {"enriched": 0, "linked_to_our_db": 0, "failed": 0}
+
+    logger.info("Citation zenginlestirme basliyor: {} satir (concurrency={})", len(rows), concurrency)
+
+    enriched = 0
+    linked = 0
+    failed = 0
+
+    async def _process(citation_id: int, openalex_id: str):
+        nonlocal enriched, linked, failed
+        async with sem:
+            try:
+                info = await fetch_openalex_work_by_id(client, openalex_id)
+                if not info:
+                    failed += 1
+                    return
+
+                doi = info.get("doi") or ""
+                title = info.get("title") or ""
+
+                # resolve once: bizim DB'de var mi?
+                article_id = None
+                if doi:
+                    article_id = resolve_citation_targets(conn, cited_doi=doi)
+
+                conn.execute(
+                    "UPDATE citations SET cited_doi = ?, cited_title = ?, cited_article_id = ? WHERE id = ?",
+                    (doi or None, title or None, article_id, citation_id),
+                )
+                conn.commit()
+                enriched += 1
+                if article_id:
+                    linked += 1
+                await asyncio.sleep(0.15)
+            except Exception:
+                failed += 1
+                logger.exception("Citation {} zenginlestirilemedi", citation_id)
+
+    tasks = [_process(cid, oid) for cid, oid in rows]
+    await asyncio.gather(*tasks)
+
+    logger.info(
+        "Citation zenginlestirme tamamlandi: enriched={}, linked={}, failed={}",
+        enriched, linked, failed,
+    )
+    return {"enriched": enriched, "linked_to_our_db": linked, "failed": failed}

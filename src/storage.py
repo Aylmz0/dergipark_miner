@@ -220,3 +220,23 @@ def insert_citation(
     )
     conn.commit()
     return cur.lastrowid
+
+
+def resolve_citation_targets(conn: sqlite3.Connection, *, cited_doi: str = "") -> int | None:
+    """Verilen DOI ile bizim articles tablomuzda eslesen makale id'sini dondurur.
+
+    DOI'yi normalize eder: https://doi.org/ prefix'ini kaldirir.
+    Bulamazsa None dondurur.
+    """
+    doi = (cited_doi or "").strip()
+    if not doi:
+        return None
+    # Normalize: https://doi.org/10.xxx -> 10.xxx
+    if doi.startswith("https://doi.org/"):
+        doi = doi[len("https://doi.org/"):]
+    elif doi.startswith("http://doi.org/"):
+        doi = doi[len("http://doi.org/"):]
+    elif doi.startswith("doi.org/"):
+        doi = doi[len("doi.org/"):]
+    row = conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone()
+    return row[0] if row else None

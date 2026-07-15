@@ -4,7 +4,12 @@ import asyncio
 
 import httpx
 
-from src.enrich import enrich_article_citations, fetch_openalex_work, fetch_openalex_work_by_id
+from src.enrich import (
+    enrich_article_citations,
+    enrich_existing_citations,
+    fetch_openalex_work,
+    fetch_openalex_work_by_id,
+)
 from src.storage import init_db, insert_article, insert_citation
 
 
@@ -248,4 +253,80 @@ def test_insert_citation_no_dedup_without_openalex_id(tmp_path):
     insert_citation(conn, citing_article_id=aid, cited_doi="10.1000/x")
     count = conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
     assert count == 2
+    conn.close()
+
+
+# ---------------------------------------------------------------------------
+# enrich_existing_citations tests
+# ---------------------------------------------------------------------------
+
+def test_enrich_existing_citations_updates_doi_and_title(tmp_path):
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, oai_id="oai:test:enrich_cite1")
+
+    # cited_openalex_id dolu, cited_doi bos citation olustur
+    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W777")
+    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "https://openalex.org/W777",
+            "doi": "https://doi.org/10.1000/enriched",
+            "title": "Enriched Title",
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(enrich_existing_citations(client, conn))
+
+    assert result["enriched"] == 1
+    row = conn.execute("SELECT cited_doi, cited_title FROM citations WHERE id = ?", (cid,)).fetchone()
+    assert row[0] == "https://doi.org/10.1000/enriched"
+    assert row[1] == "Enriched Title"
+    conn.close()
+
+
+def test_enrich_existing_citations_links_to_our_db(tmp_path):
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, oai_id="oai:test:enrich_cite2")
+
+    # Bizim DB'mizdeki bir makaleyi referans alalim
+    target_id = _make_article(conn, title="Target Article", oai_id="oai:test:target")
+    conn.execute("UPDATE articles SET doi = '10.9999/target' WHERE id = ?", (target_id,))
+    conn.commit()
+
+    # Bos DOI'li citation olustur
+    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W888")
+    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
+    conn.commit()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": "https://openalex.org/W888",
+            "doi": "https://doi.org/10.9999/target",
+            "title": "Target Article",
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(enrich_existing_citations(client, conn))
+
+    assert result["enriched"] == 1
+    assert result["linked_to_our_db"] == 1
+    row = conn.execute("SELECT cited_article_id, cited_doi FROM citations WHERE id = ?", (cid,)).fetchone()
+    assert row[0] == target_id
+    assert row[1] == "https://doi.org/10.9999/target"
+    conn.close()
+
+
+def test_enrich_existing_citations_skips_already_enriched(tmp_path):
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, oai_id="oai:test:enrich_cite3")
+
+    # cited_doi zaten dolu olan citation
+    insert_citation(conn, citing_article_id=aid, cited_openalex_id="W999", cited_doi="10.1000/already")
+
+    client = _make_client(lambda r: httpx.Response(200, json={}))
+    result = asyncio.run(enrich_existing_citations(client, conn))
+
+    assert result["enriched"] == 0
     conn.close()
