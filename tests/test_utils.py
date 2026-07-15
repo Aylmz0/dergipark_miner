@@ -168,3 +168,26 @@ def test_retry_500_retries():
     else:
         raise AssertionError("Hata firlatilmadi")
     assert call_count == 3  # 3 deneme yapildi
+
+
+def test_checkpoint_roundtrip(tmp_path):
+    """save_checkpoint -> load_checkpoint ayni dict'i dondurur."""
+    path = tmp_path / "cp.json"
+    state = {"last_journal_index": 12, "processed_articles": 340}
+    utils.save_checkpoint(path, state=state)
+    loaded = utils.load_checkpoint(path)
+    assert loaded == state
+
+
+def test_checkpoint_load_missing_file():
+    """Dosya yoksa {} dondurur."""
+    result = utils.load_checkpoint("/nonexistent/path/cp.json")
+    assert result == {}
+
+
+def test_checkpoint_load_corrupt_file(tmp_path):
+    """Bozuk JSON dosyasi {} dondurur."""
+    path = tmp_path / "corrupt.json"
+    path.write_text("{invalid json!!!", encoding="utf-8")
+    result = utils.load_checkpoint(path)
+    assert result == {}

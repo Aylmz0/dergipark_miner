@@ -128,3 +128,25 @@ def setup_logger() -> None:
         diagnose=True,
     )
     _logger_ready = True
+
+
+def save_checkpoint(path: str | Path = "checkpoint.json", *, state: dict) -> None:
+    """Checkpoint dosyasina son islenen durumu yazar (atomik: .tmp + rename)."""
+    path = Path(path)
+    tmp = path.with_suffix(".tmp")
+    import json
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(path)
+
+
+def load_checkpoint(path: str | Path = "checkpoint.json") -> dict:
+    """Checkpoint dosyasindan durumu okur. Dosya yoksa veya bozuksa {} dondurur."""
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Checkpoint dosyasi bozuk: {}", path)
+        return {}
