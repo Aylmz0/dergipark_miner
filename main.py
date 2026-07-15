@@ -13,7 +13,12 @@ import httpx  # noqa: E402
 from loguru import logger  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
-from src.crawler import DEFAULT_USER_AGENT, parse_article_metadata  # noqa: E402
+from src.crawler import (  # noqa: E402
+    DEFAULT_USER_AGENT,
+    fetch_journal_shortnames,
+    harvest_all_journals,
+    parse_article_metadata,
+)
 from src.enrich import enrich_all_articles  # noqa: E402
 from src.storage import init_db, insert_article  # noqa: E402
 from src.utils import setup_logger  # noqa: E402
@@ -28,54 +33,52 @@ async def run():
     conn = init_db(db_path)
     logger.info("Veritaban hazir: {}", db_path)
 
-    # 2. Dergi listesi (sabit ornek; gercek fetch sonra eklenir)
-    sample_journals = ["ihad", "tip"]
-
-    # 3. OAI ham XML -> parse -> insert
-    sample_records = {
-        "ihad": [
-            """<?xml version="1.0"?>
-            <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
-              <ListRecords>
-                <record>
-                  <metadata>
-                    <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
-                      <dc:title><![CDATA[Ornek Makale I]]></dc:title>
-                      <dc:creator><![CDATA[Yazar, Ali]]></dc:creator>
-                      <dc:date>2024-01-01</dc:date>
-                      <dc:relation>https://dergipark.org.tr/en/pub/ihad</dc:relation>
-                    </oai_dc:dc>
-                  </metadata>
-                </record>
-              </ListRecords>
-            </OAI-PMH>"""
-        ],
-    }
-
-    total = 0
-    for journal_name in tqdm(sample_journals, desc="Dergiler"):
-        xml_pages = sample_records.get(journal_name, [])
-        for xml_text in xml_pages:
-            meta = parse_article_metadata(xml_text)
-            insert_article(conn, meta)
-            total += 1
-            logger.debug("Kaydedildi: {}", meta.get("title", ""))
-
-    logger.info("Makaleler yazildi: {}", total)
-
-    # 4. OpenAlex zenginlestirme
     async with httpx.AsyncClient(
         follow_redirects=True,
         headers={"User-Agent": DEFAULT_USER_AGENT},
-        timeout=httpx.Timeout(30.0),
+        timeout=httpx.Timeout(60.0),
     ) as client:
-        result = await enrich_all_articles(client, conn)
-        logger.info(
-            "Zenginlestirme: enriched={}, citations={}, failed={}",
-            result["enriched"],
-            result["citations_added"],
-            result["failed"],
-        )
+        # 2. Dergi listesini kesfet
+        try:
+            shortnames = await fetch_journal_shortnames(client, max_pages=1)
+            logger.info("Dergi listesi: {} dergi bulundu", len(shortnames))
+        except Exception:
+            logger.exception("Dergi listesi cekilemedi; ornek liste kullaniyor")
+            shortnames = ["ihad"]
+
+        # 3. OAI ham XML cek
+        try:
+            results = await harvest_all_journals(
+                client, shortnames, concurrency=2, max_records_per_journal=20
+            )
+            logger.info("Harvest tamamlandi: {} dergi", len(results))
+        except Exception:
+            logger.exception("Harvest basarisiz")
+            results = {}
+
+        # 4. Parse + insert
+        total = 0
+        for shortname, xml_pages in results.items():
+            for xml_text in tqdm(xml_pages, desc=f"{shortname}", leave=False):
+                try:
+                    meta = parse_article_metadata(xml_text)
+                    insert_article(conn, meta)
+                    total += 1
+                except Exception:
+                    logger.exception("Parse/insert hatasi: {}", shortname)
+        logger.info("Makaleler yazildi: {}", total)
+
+        # 5. OpenAlex zenginlestirme
+        try:
+            result = await enrich_all_articles(client, conn, concurrency=3, batch_size=50)
+            logger.info(
+                "Zenginlestirme: enriched={}, citations={}, failed={}",
+                result["enriched"],
+                result["citations_added"],
+                result["failed"],
+            )
+        except Exception:
+            logger.exception("Zenginlestirme hatasi")
 
     conn.close()
     logger.info("=== dergipark-miner bitti ===")
