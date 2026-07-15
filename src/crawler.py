@@ -144,7 +144,8 @@ def _node_text(node) -> str:
 def parse_article_metadata(xml_text: str) -> dict:
     """Tek bir OAI kaydinin (oai_dc) ham XML'inden makale metadatasini cikarir.
 
-    Donus alanlari: title, doi, authors (list[str]), publication_date, journal_shortname.
+    Donus alanlari: title, doi, authors (list[str]), publication_date,
+                     journal_shortname, oai_identifier.
     Alan bulunamazsa "" veya [] doner; hicbir zaman crash yapmaz.
     GÖREV 5'in dondurdugu ham OAI XML seklıyle uyumludur.
     """
@@ -155,6 +156,12 @@ def parse_article_metadata(xml_text: str) -> dict:
     identifiers: list[str] = []
     relations: list[str] = []
     sources: list[str] = []
+
+    # header'daki <identifier> (oai:dergipark.org.tr:article/...)
+    oai_id = ""
+    header_node = tree.css_first("header identifier")
+    if header_node:
+        oai_id = _node_text(header_node)
 
     for node in tree.css("*"):
         tag = node.tag
@@ -208,4 +215,5 @@ def parse_article_metadata(xml_text: str) -> dict:
         "authors": [a for a in creators if a],
         "publication_date": dates[0] if dates else "",
         "journal_shortname": journal_shortname,
+        "oai_identifier": oai_id,
     }

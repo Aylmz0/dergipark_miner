@@ -62,6 +62,12 @@ def init_db(path: str | Path) -> sqlite3.Connection:
         );
         """
     )
+
+    # Eski veritabaninda oai_identifier kolonu eksik olabilir; ekle
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
+    if "oai_identifier" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN oai_identifier TEXT")
+
     conn.commit()
     return conn
 
@@ -83,7 +89,8 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     """GÖREV 5'in metadata dict'ini articles tablosuna yazar, article id'sini döndürür.
 
     - journal_shortname -> journal_id çözülür (gerekirse journals'a eklenir).
-    - DOI varsa UPSERT (mevcut kayıt güncellenir), yoksa yeni satır eklenir.
+    - Oncelik: oai_identifier > doi > yeni satır.
+    - oai_identifier veya doi varsa mevcut kaydi guncelle (UPSERT).
     - Dönen değer articles.id (rowid).
     """
     journal_id = _resolve_journal(conn, article.get("journal_shortname") or "")
@@ -92,6 +99,25 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     publication_date = article.get("publication_date") or ""
     oai_identifier = article.get("oai_identifier") or ""
 
+    # 1. oai_identifier ile bul
+    if oai_identifier:
+        existing = conn.execute(
+            "SELECT id FROM articles WHERE oai_identifier = ?", (oai_identifier,)
+        ).fetchone()
+        if existing:
+            article_id = existing[0]
+            conn.execute(
+                """
+                UPDATE articles
+                SET journal_id=?, title=?, doi=?, publication_date=?, oai_identifier=?
+                WHERE id=?
+                """,
+                (journal_id, title, doi, publication_date, oai_identifier, article_id),
+            )
+            conn.commit()
+            return article_id
+
+    # 2. DOI ile bul
     if doi:
         existing = conn.execute(
             "SELECT id FROM articles WHERE doi = ?", (doi,)
@@ -101,14 +127,15 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
             conn.execute(
                 """
                 UPDATE articles
-                SET journal_id = ?, title = ?, publication_date = ?, oai_identifier = ?
-                WHERE id = ?
+                SET journal_id=?, title=?, publication_date=?, oai_identifier=?
+                WHERE id=?
                 """,
                 (journal_id, title, publication_date, oai_identifier, article_id),
             )
             conn.commit()
             return article_id
 
+    # 3. Yeni satir
     cur = conn.execute(
         """
         INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier)

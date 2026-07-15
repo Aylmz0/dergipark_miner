@@ -177,6 +177,7 @@ def test_parse_article_metadata_extracts_fields():
     assert meta["authors"] == ["Orğun, Fırat", "Kumaş, Ali"]
     assert meta["publication_date"] == "2022-01-14"
     assert meta["journal_shortname"] == "ihad"
+    assert meta["oai_identifier"] == "oai:dergipark.org.tr:article/1057489"
 
 
 def test_parse_article_metadata_handles_missing_fields():
@@ -187,6 +188,7 @@ def test_parse_article_metadata_handles_missing_fields():
     assert meta["authors"] == []
     assert meta["publication_date"] == ""
     assert meta["journal_shortname"] == ""
+    assert meta["oai_identifier"] == ""
 
 
 def test_parse_article_metadata_prefers_en_title():

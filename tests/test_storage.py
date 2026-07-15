@@ -63,3 +63,29 @@ def test_insert_article_upsert_by_doi(conn):
     ).fetchone()
     assert row[0] == "Yeni Baslik"
     assert row[1] == "2021-05-05"
+
+
+def test_insert_article_upsert_by_oai_identifier(conn):
+    """DOI'siz makalede oai_identifier'a göre duplicate önleme."""
+    base = {
+        "title": "Eski Baslik",
+        "doi": "",
+        "authors": [],
+        "publication_date": "2020-01-01",
+        "journal_shortname": "ihad",
+        "oai_identifier": "oai:dergipark.org.tr:article/999999",
+    }
+    first_id = insert_article(conn, base)
+    updated = dict(base, title="Yeni Baslik", publication_date="2021-05-05")
+    second_id = insert_article(conn, updated)
+
+    assert first_id == second_id
+    count = conn.execute(
+        "SELECT COUNT(*) FROM articles WHERE oai_identifier = ?", (base["oai_identifier"],)
+    ).fetchone()[0]
+    assert count == 1
+    row = conn.execute(
+        "SELECT title, publication_date FROM articles WHERE id = ?", (second_id,)
+    ).fetchone()
+    assert row[0] == "Yeni Baslik"
+    assert row[1] == "2021-05-05"
