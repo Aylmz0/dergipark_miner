@@ -1,40 +1,37 @@
 """dergipark-miner ana orkestrasyon dosyasi.
 
-Minimal iskelet: src modullerini kullanarak asagidaki adimlari sirayla calistirir.
-Gercek veri cekmez; loguru + tqdm ile ilerleme gosterir.
+DergiOAI cek -> parse et -> SQLite'a yaz -> OpenAlex ile zenginlestir.
 """
 
 import sys
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent
-sys.path.insert(0, str(_root))        # src paketini import icin
-sys.path.insert(0, str(_root / "src")) # crawler icindeki "from utils import" icin
+sys.path.insert(0, str(_root))
 
+import httpx  # noqa: E402
 from loguru import logger  # noqa: E402
 from tqdm import tqdm  # noqa: E402
 
-from src.crawler import parse_article_metadata  # noqa: E402
+from src.crawler import DEFAULT_USER_AGENT, parse_article_metadata  # noqa: E402
+from src.enrich import enrich_all_articles  # noqa: E402
 from src.storage import init_db, insert_article  # noqa: E402
 from src.utils import setup_logger  # noqa: E402
 
 
 async def run():
-    """Ornek akis iskeleti: dergi listesi -> ham XML -> parse -> SQLite."""
-
     setup_logger()
     logger.info("=== dergipark-miner baslatildi ===")
 
-    # 1. Veritabanini hazirla
+    # 1. Veritabani
     db_path = Path("data/Sobiad_Mining.sqlite")
     conn = init_db(db_path)
     logger.info("Veritaban hazir: {}", db_path)
 
-    # 2. Ornek dergi listesi (gercek ag cekmeden)
+    # 2. Dergi listesi (sabit ornek; gercek fetch sonra eklenir)
     sample_journals = ["ihad", "tip"]
-    logger.info("Dergi listesi hazir: {} dergi", len(sample_journals))
 
-    # 3. Ornek ham XML verisi (gercek OAI cekmeden)
+    # 3. OAI ham XML -> parse -> insert
     sample_records = {
         "ihad": [
             """<?xml version="1.0"?>
@@ -55,7 +52,6 @@ async def run():
         ],
     }
 
-    # 4. Parse et ve veritabanina yaz
     total = 0
     for journal_name in tqdm(sample_journals, desc="Dergiler"):
         xml_pages = sample_records.get(journal_name, [])
@@ -65,8 +61,23 @@ async def run():
             total += 1
             logger.debug("Kaydedildi: {}", meta.get("title", ""))
 
+    logger.info("Makaleler yazildi: {}", total)
+
+    # 4. OpenAlex zenginlestirme
+    async with httpx.AsyncClient(
+        follow_redirects=True,
+        headers={"User-Agent": DEFAULT_USER_AGENT},
+        timeout=httpx.Timeout(30.0),
+    ) as client:
+        result = await enrich_all_articles(client, conn)
+        logger.info(
+            "Zenginlestirme: enriched={}, citations={}, failed={}",
+            result["enriched"],
+            result["citations_added"],
+            result["failed"],
+        )
+
     conn.close()
-    logger.info("Tamamlandi: {} makale islendi", total)
     logger.info("=== dergipark-miner bitti ===")
 
 

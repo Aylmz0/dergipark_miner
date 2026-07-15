@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 from loguru import logger
 
@@ -69,7 +71,6 @@ async def enrich_article_citations(
     count = 0
 
     for ref_id in ref_ids:
-        # OpenAlex URL'den W-id cikar (orn. https://openalex.org/W123456 -> W123456)
         wid = ref_id.split("/")[-1] if "/" in ref_id else ref_id
         insert_citation(
             conn,
@@ -79,3 +80,56 @@ async def enrich_article_citations(
         count += 1
 
     return count
+
+
+async def enrich_all_articles(
+    client: httpx.AsyncClient,
+    conn,
+    *,
+    concurrency: int = 3,
+    batch_size: int = 50,
+) -> dict:
+    """Tum makaleleri OpenAlex uzerinden zenginlestirir (referans/atif cekme).
+
+    articles tablosundan (id, doi, title) LIMIT batch_size ceker.
+    Her makale icin enrich_article_citations'ı semaphore ile cagirir.
+    Donus: {enriched: N, citations_added: M, failed: K}
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    rows = conn.execute(
+        "SELECT id, doi, title FROM articles LIMIT ?", (batch_size,)
+    ).fetchall()
+    if not rows:
+        logger.info("Zenginlestirilecek makale yok")
+        return {"enriched": 0, "citations_added": 0, "failed": 0}
+
+    logger.info("Zenginlestirme basliyor: {} makale (concurrency={})", len(rows), concurrency)
+
+    enriched = 0
+    citations_added = 0
+    failed = 0
+
+    async def _process(article_id: int, doi: str, title: str):
+        nonlocal enriched, citations_added, failed
+        async with sem:
+            try:
+                count = await enrich_article_citations(
+                    client, article_id, {"doi": doi, "title": title}, conn
+                )
+                enriched += 1
+                citations_added += count
+                logger.debug("Makale {} -> {} referans", article_id, count)
+                await asyncio.sleep(0.15)  # rate-limit
+            except Exception:
+                failed += 1
+                logger.exception("Makale {} zenginlestirilemedi", article_id)
+
+    tasks = [_process(aid, doi or "", title or "") for aid, doi, title in rows]
+    await asyncio.gather(*tasks)
+
+    logger.info(
+        "Zenginlestirme tamamlandi: enriched={}, citations={}, failed={}",
+        enriched, citations_added, failed,
+    )
+    return {"enriched": enriched, "citations_added": citations_added, "failed": failed}
