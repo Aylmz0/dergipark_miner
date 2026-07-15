@@ -7,7 +7,7 @@ import re
 import httpx
 from selectolax.parser import HTMLParser
 
-from utils import logger, retry, setup_logger
+from src.utils import logger, retry, setup_logger
 
 # DergiPark OAI-PMH taban URL'i (canli testle 2026-07 teyit edildi, 200 + <OAI-PMH>).
 # OAI-PMH dergi bazlidir; tekil dergi URL'i f"{DERGIPARK_OAI_BASE}/{dergi_kisa_adi}"
@@ -113,12 +113,8 @@ async def harvest_all_journals(
                     collected_records += body.count("<record>")
                     if "<resumptionToken" not in body:
                         break
-                    token = (
-                        body.split("<resumptionToken", 1)[1]
-                        .split(">", 1)[1]
-                        .split("</resumptionToken>", 1)[0]
-                        .strip()
-                    )
+                    token_node = HTMLParser(body).css_first("resumptionToken")
+                    token = (token_node.text(strip=True) if token_node else "") or ""
                     if not token:
                         break
                     url = (
@@ -153,11 +149,12 @@ def parse_article_metadata(xml_text: str) -> dict:
     GÖREV 5'in dondurdugu ham OAI XML seklıyle uyumludur.
     """
     tree = HTMLParser(xml_text)
-    titles: list[str] = []
+    titles: list[tuple[str, str]] = []  # (text, lang)
     creators: list[str] = []
     dates: list[str] = []
     identifiers: list[str] = []
     relations: list[str] = []
+    sources: list[str] = []
 
     for node in tree.css("*"):
         tag = node.tag
@@ -165,7 +162,8 @@ def parse_article_metadata(xml_text: str) -> dict:
             continue
         text = _node_text(node)
         if tag == "dc:title":
-            titles.append(text)
+            lang = (node.attributes.get("xml:lang") or "").lower()
+            titles.append((text, lang))
         elif tag == "dc:creator":
             creators.append(text)
         elif tag == "dc:date":
@@ -174,6 +172,14 @@ def parse_article_metadata(xml_text: str) -> dict:
             identifiers.append(text)
         elif tag == "dc:relation":
             relations.append(text)
+        elif tag == "dc:source":
+            sources.append(text)
+
+    # en baslik tercih et; yoksa ilkini al
+    title = ""
+    if titles:
+        en_titles = [t for t, lang in titles if lang.startswith("en")]
+        title = en_titles[0] if en_titles else titles[0][0]
 
     doi = ""
     for ident in identifiers:
@@ -185,15 +191,19 @@ def parse_article_metadata(xml_text: str) -> dict:
             doi = ident.split("doi.org/")[-1].strip("/")
             break
 
+    # journal_shortname: once relation'da, sonra source'da /pub/{slug} ara
     journal_shortname = ""
-    for rel in relations:
-        m = re.search(r"/pub/([^/\s]+)", rel)
-        if m:
-            journal_shortname = m.group(1)
+    for pool in (relations, sources):
+        for item in pool:
+            m = re.search(r"/pub/([^/\s]+)", item)
+            if m:
+                journal_shortname = m.group(1)
+                break
+        if journal_shortname:
             break
 
     return {
-        "title": titles[0] if titles else "",
+        "title": title,
         "doi": doi,
         "authors": [a for a in creators if a],
         "publication_date": dates[0] if dates else "",

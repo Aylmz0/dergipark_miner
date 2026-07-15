@@ -97,6 +97,51 @@ async def _harvest(
         )
 
 
+OAI_PAGE_1 = """<?xml version="1.0"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <ListRecords>
+    <record><header><identifier>a</identifier></header></record>
+    <resumptionToken completeListSize="3" cursor="0">token_page2</resumptionToken>
+  </ListRecords>
+</OAI-PMH>
+"""
+
+OAI_PAGE_2 = """<?xml version="1.0"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <ListRecords>
+    <record><header><identifier>b</identifier></header></record>
+    <record><header><identifier>c</identifier></header></record>
+  </ListRecords>
+</OAI-PMH>
+"""
+
+_call_log = []
+
+
+def _resumption_handler(request: httpx.Request) -> httpx.Response:
+    url = str(request.url)
+    _call_log.append(url)
+    if "resumptionToken=token_page2" in url:
+        return httpx.Response(200, text=OAI_PAGE_2)
+    return httpx.Response(200, text=OAI_PAGE_1)
+
+
+def test_harvest_follows_resumption_token():
+    _call_log.clear()
+    transport = httpx.MockTransport(_resumption_handler)
+
+    result: dict[str, list[str]] = asyncio.run(
+        _harvest(transport, ["dergi-x"], concurrency=1)
+    )
+
+    pages = result["dergi-x"]
+    assert len(pages) == 2
+    assert pages[0].count("<record>") == 1
+    assert pages[1].count("<record>") == 2
+    assert len(_call_log) == 2
+    assert "resumptionToken=token_page2" in _call_log[1]
+
+
 SAMPLE_RECORD_XML = """<?xml version="1.0"?>
 <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
   <request verb="ListRecords">https://dergipark.org.tr/api/public/oai/ihad</request>
@@ -142,4 +187,67 @@ def test_parse_article_metadata_handles_missing_fields():
     assert meta["authors"] == []
     assert meta["publication_date"] == ""
     assert meta["journal_shortname"] == ""
+
+
+def test_parse_article_metadata_prefers_en_title():
+    """Birden fazla dc:title varsa en-US olanı tercih et."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title xml:lang="tr-TR"><![CDATA[Turkce Baslik]]></dc:title>
+              <dc:title xml:lang="en-US"><![CDATA[English Title]]></dc:title>
+              <dc:relation>https://dergipark.org.tr/en/pub/ornak</dc:relation>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["title"] == "English Title"
+    assert meta["journal_shortname"] == "ornak"
+
+
+def test_parse_article_metadata_falls_back_to_source():
+    """dc:relation'da /pub/ yoksa dc:source'a bak."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title><![CDATA[Baslik]]></dc:title>
+              <dc:source>Deniz Bilimleri Dergisi No. 12</dc:source>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["title"] == "Baslik"
+    assert meta["journal_shortname"] == ""
+
+
+def test_parse_article_metadata_source_has_pub_slug():
+    """dc:relation'da yok ama dc:source içinde /pub/ varsa shortname bulunur."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title><![CDATA[Test]]></dc:title>
+              <dc:source>https://dergipark.org.tr/en/pub/dergixyz/issue/123</dc:source>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["journal_shortname"] == "dergixyz"
 
