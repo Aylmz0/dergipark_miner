@@ -209,6 +209,14 @@ def parse_article_metadata(xml_text: str) -> dict:
         if journal_shortname:
             break
 
+    # journal_name: dc:source icindeki dergi adi (URL olmayan ilk deger)
+    journal_name = ""
+    for src in sources:
+        src = src.strip()
+        if src and not src.startswith("http"):
+            journal_name = src
+            break
+
     return {
         "title": title,
         "doi": doi,
@@ -216,4 +224,5 @@ def parse_article_metadata(xml_text: str) -> dict:
         "publication_date": dates[0] if dates else "",
         "journal_shortname": journal_shortname,
         "oai_identifier": oai_id,
+        "journal_name": journal_name,
     }

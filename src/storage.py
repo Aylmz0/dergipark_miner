@@ -72,16 +72,26 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def _resolve_journal(conn: sqlite3.Connection, short_name: str) -> int:
-    """journal_shortname'i journals tablosunda çözer; yoksa ekler ve id döndürür."""
+def _resolve_journal(conn: sqlite3.Connection, short_name: str, name: str = "") -> int:
+    """journal_shortname'i journals tablosunda cozer; yoksa ekler ve id dondurur.
+
+    - Yeni dergi eklerken name'i de yazar.
+    - Mevcut dergi bulundugunda name bossa ve gelen name doluysa gunceller.
+    """
     short_name = short_name or "__unknown__"
     row = conn.execute(
-        "SELECT id FROM journals WHERE short_name = ?", (short_name,)
+        "SELECT id, name FROM journals WHERE short_name = ?", (short_name,)
     ).fetchone()
     if row:
-        return row[0]
-    cur = conn.execute("INSERT INTO journals (short_name) VALUES (?)", (short_name,))
-    conn.commit()
+        journal_id = row[0]
+        existing_name = row[1] or ""
+        if not existing_name and name:
+            conn.execute("UPDATE journals SET name = ? WHERE id = ?", (name, journal_id))
+        return journal_id
+    cur = conn.execute(
+        "INSERT INTO journals (short_name, name) VALUES (?, ?)",
+        (short_name, name),
+    )
     return cur.lastrowid
 
 
@@ -94,7 +104,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     - Yazarlari authors tablosuna yazar (UPSERT'te eskilerini siler).
     - Dönen değer articles.id (rowid).
     """
-    journal_id = _resolve_journal(conn, article.get("journal_shortname") or "")
+    journal_id = _resolve_journal(conn, article.get("journal_shortname") or "", article.get("journal_name") or "")
     title = article.get("title") or ""
     doi = article.get("doi") or ""
     publication_date = article.get("publication_date") or ""

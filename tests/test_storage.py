@@ -133,3 +133,42 @@ def test_insert_article_upsert_replaces_authors(conn):
     assert len(rows) == 2
     assert rows[0][0] == "Yeni Yazar A"
     assert rows[1][0] == "Yeni Yazar B"
+
+
+def test_insert_article_writes_journal_name(conn):
+    """insert_article journals.name kolonuna dergi adini yazar."""
+    article = {
+        "title": "Test Makale",
+        "doi": "",
+        "authors": [],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "ihad",
+        "journal_name": "Islam Hukuku Arastirmalari Dergisi",
+        "oai_identifier": "oai:dergipark.org.tr:article/777777",
+    }
+    insert_article(conn, article)
+
+    row = conn.execute(
+        "SELECT name FROM journals WHERE short_name = 'ihad'"
+    ).fetchone()
+    assert row[0] == "Islam Hukuku Arastirmalari Dergisi"
+
+
+def test_insert_article_enriches_existing_journal_name(conn):
+    """Mevcut derginin name'i bossa, gelen name ile zenginlestirilir."""
+    conn.execute("INSERT INTO journals (short_name, name) VALUES ('j1', '')")
+    conn.commit()
+
+    article = {
+        "title": "Test",
+        "doi": "",
+        "authors": [],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "j1",
+        "journal_name": "Yeni Dergi Adi",
+        "oai_identifier": "oai:dergipark.org.tr:article/888888",
+    }
+    insert_article(conn, article)
+
+    row = conn.execute("SELECT name FROM journals WHERE short_name = 'j1'").fetchone()
+    assert row[0] == "Yeni Dergi Adi"
