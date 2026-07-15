@@ -91,6 +91,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     - journal_shortname -> journal_id çözülür (gerekirse journals'a eklenir).
     - Oncelik: oai_identifier > doi > yeni satır.
     - oai_identifier veya doi varsa mevcut kaydi guncelle (UPSERT).
+    - Yazarlari authors tablosuna yazar (UPSERT'te eskilerini siler).
     - Dönen değer articles.id (rowid).
     """
     journal_id = _resolve_journal(conn, article.get("journal_shortname") or "")
@@ -98,6 +99,9 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     doi = article.get("doi") or ""
     publication_date = article.get("publication_date") or ""
     oai_identifier = article.get("oai_identifier") or ""
+    authors = article.get("authors") or []
+
+    article_id = None
 
     # 1. oai_identifier ile bul
     if oai_identifier:
@@ -114,11 +118,9 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                 """,
                 (journal_id, title, doi, publication_date, oai_identifier, article_id),
             )
-            conn.commit()
-            return article_id
 
     # 2. DOI ile bul
-    if doi:
+    if article_id is None and doi:
         existing = conn.execute(
             "SELECT id FROM articles WHERE doi = ?", (doi,)
         ).fetchone()
@@ -132,16 +134,31 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                 """,
                 (journal_id, title, publication_date, oai_identifier, article_id),
             )
-            conn.commit()
-            return article_id
 
     # 3. Yeni satir
-    cur = conn.execute(
-        """
-        INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (journal_id, title, doi, publication_date, oai_identifier),
-    )
+    if article_id is None:
+        cur = conn.execute(
+            """
+            INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (journal_id, title, doi, publication_date, oai_identifier),
+        )
+        article_id = cur.lastrowid
+
+    _write_authors(conn, article_id, authors)
     conn.commit()
-    return cur.lastrowid
+    return article_id
+
+
+def _write_authors(conn: sqlite3.Connection, article_id: int, authors: list) -> None:
+    """Makaleye ait yazarlari authors tablosuna yazar. UPSERT'te eski satirlari siler yeniden ekler."""
+    conn.execute("DELETE FROM authors WHERE article_id = ?", (article_id,))
+    for name in authors:
+        name = (name or "").strip()
+        if not name:
+            continue
+        conn.execute(
+            "INSERT INTO authors (article_id, name) VALUES (?, ?)",
+            (article_id, name),
+        )

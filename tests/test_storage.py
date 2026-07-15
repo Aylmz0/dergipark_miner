@@ -89,3 +89,47 @@ def test_insert_article_upsert_by_oai_identifier(conn):
     ).fetchone()
     assert row[0] == "Yeni Baslik"
     assert row[1] == "2021-05-05"
+
+
+def test_insert_article_writes_authors(conn):
+    """insert_article authors tablosuna yazar."""
+    article = {
+        "title": "Yazarli Makale",
+        "doi": "",
+        "authors": ["Yazar, Ali", "Yazar, Veli"],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "testjournal",
+        "oai_identifier": "oai:dergipark.org.tr:article/555555",
+    }
+    article_id = insert_article(conn, article)
+
+    rows = conn.execute(
+        "SELECT name FROM authors WHERE article_id = ? ORDER BY name", (article_id,)
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == "Yazar, Ali"
+    assert rows[1][0] == "Yazar, Veli"
+
+
+def test_insert_article_upsert_replaces_authors(conn):
+    """UPSERT'te eski yazarlar silinip yenisi eklenir."""
+    article = {
+        "title": "Makale",
+        "doi": "",
+        "authors": ["Eski Yazar"],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "testjournal",
+        "oai_identifier": "oai:dergipark.org.tr:article/666666",
+    }
+    first_id = insert_article(conn, article)
+
+    updated = dict(article, authors=["Yeni Yazar A", "Yeni Yazar B"])
+    second_id = insert_article(conn, updated)
+
+    assert first_id == second_id
+    rows = conn.execute(
+        "SELECT name FROM authors WHERE article_id = ? ORDER BY name", (second_id,)
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == "Yeni Yazar A"
+    assert rows[1][0] == "Yeni Yazar B"
