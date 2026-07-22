@@ -9,7 +9,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import httpx
 
-from crawler import fetch_journal_shortnames, harvest_all_journals, parse_article_metadata
+from crawler import (
+    download_pdf,
+    fetch_article_pdf_url,
+    fetch_journal_shortnames,
+    harvest_all_journals,
+    load_pdf_errors,
+    log_pdf_error,
+    parse_article_metadata,
+)
 
 SAMPLE_HTML = """
 <html>
@@ -254,4 +262,113 @@ def test_parse_article_metadata_source_has_pub_slug():
     """
     meta = parse_article_metadata(xml)
     assert meta["journal_shortname"] == "dergixyz"
+
+
+# ---------------------------------------------------------------------------
+# fetch_article_pdf_url tests
+# ---------------------------------------------------------------------------
+
+def test_fetch_article_pdf_url_finds_download_link():
+    def handler(request: httpx.Request) -> httpx.Response:
+        html = """
+        <html><body>
+            <a href="/tr/download/article-file/5788429">PDF Indir</a>
+            <a href="/tr/pub/ihad/article/12345">View</a>
+        </body></html>
+        """
+        return httpx.Response(200, text=html)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
+    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
+    assert result is not None
+    assert "download/article-file" in result
+
+
+def test_fetch_article_pdf_url_finds_pdf_link():
+    def handler(request: httpx.Request) -> httpx.Response:
+        html = """
+        <html><body>
+            <a href="/tr/pub/ihad/article/12345/paper.pdf">PDF</a>
+        </body></html>
+        """
+        return httpx.Response(200, text=html)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
+    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
+    assert result is not None
+    assert result.endswith(".pdf")
+
+
+def test_fetch_article_pdf_url_no_pdf_found():
+    def handler(request: httpx.Request) -> httpx.Response:
+        html = "<html><body><a href='/view'>View</a></body></html>"
+        return httpx.Response(200, text=html)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
+    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
+    assert result is None
+
+
+def test_fetch_article_pdf_url_absolute_pdf_link():
+    def handler(request: httpx.Request) -> httpx.Response:
+        html = '<html><body><a href="https://cdn.example.com/paper.pdf">PDF</a></body></html>'
+        return httpx.Response(200, text=html)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
+    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
+    assert result == "https://cdn.example.com/paper.pdf"
+
+
+# ---------------------------------------------------------------------------
+# download_pdf tests
+# ---------------------------------------------------------------------------
+
+def test_download_pdf_writes_file(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"%PDF-1.4 fake content")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    dest = tmp_path / "test.pdf"
+    result = asyncio.run(download_pdf(client, "https://example.com/paper.pdf", dest))
+    assert result is True
+    assert dest.exists()
+    assert dest.read_bytes() == b"%PDF-1.4 fake content"
+
+
+def test_download_pdf_handles_error(tmp_path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="Not Found")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    dest = tmp_path / "missing.pdf"
+    result = asyncio.run(download_pdf(client, "https://example.com/missing.pdf", dest))
+    assert result is False
+    assert not dest.exists()
+
+
+# ---------------------------------------------------------------------------
+# PDF error logging tests
+# ---------------------------------------------------------------------------
+
+def test_log_pdf_error_and_load(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
+    errors = load_pdf_errors()
+    assert len(errors) == 1
+    assert errors[0]["oai_id"] == "oai:test:1"
+    assert errors[0]["error"] == "404 Not Found"
+
+
+def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
+    errors = load_pdf_errors()
+    assert len(errors) == 1
 

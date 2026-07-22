@@ -20,3 +20,5 @@ checkpoint.json
 
 # Git
 .git/
+
+graphify-out/

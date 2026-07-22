@@ -16,8 +16,11 @@ from tqdm import tqdm  # noqa: E402
 
 from src.crawler import (  # noqa: E402
     DEFAULT_USER_AGENT,
+    download_pdf,
+    fetch_article_pdf_url,
     fetch_journal_shortnames,
     harvest_all_journals,
+    log_pdf_error,
     parse_article_metadata,
 )
 from src.enrich import enrich_all_articles, enrich_existing_citations  # noqa: E402
@@ -104,6 +107,48 @@ async def run():
                 logger.warning("Checkpoint yazilamadi")
 
         logger.info("Makaleler yazildi: {}", total)
+
+        # 4b. PDF indirme
+        try:
+            articles = conn.execute(
+                """
+                SELECT a.id, a.oai_identifier, j.short_name
+                FROM articles a
+                JOIN journals j ON a.journal_id = j.id
+                LIMIT 50
+                """
+            ).fetchall()
+            pdf_downloaded = 0
+            pdf_failed = 0
+            for _article_id, oai_id, journal in articles:
+                if not oai_id:
+                    continue
+                # PDF dosya adi: oai_id'deki / yerine _ ile
+                safe_name = oai_id.replace("/", "_") + ".pdf"
+                pdf_path = Path("data/raw_pdfs") / safe_name
+                if pdf_path.exists():
+                    continue  # zaten indirildi
+
+                article_url = f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
+                try:
+                    pdf_url = await fetch_article_pdf_url(client, article_url)
+                    if not pdf_url:
+                        log_pdf_error(oai_id, article_url, "PDF link bulunamadi")
+                        pdf_failed += 1
+                        continue
+                    ok = await download_pdf(client, pdf_url, pdf_path)
+                    if ok:
+                        pdf_downloaded += 1
+                    else:
+                        log_pdf_error(oai_id, article_url, "PDF indirilemedi")
+                        pdf_failed += 1
+                except Exception as exc:
+                    log_pdf_error(oai_id, article_url, str(exc))
+                    pdf_failed += 1
+
+            logger.info("PDF indirme: {} basarili, {} basarisiz", pdf_downloaded, pdf_failed)
+        except Exception:
+            logger.exception("PDF indirme hatasi")
 
         # 5. OpenAlex zenginlestirme
         try:
