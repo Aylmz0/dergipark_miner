@@ -25,18 +25,6 @@ def _seed_db(conn) -> None:
     conn.execute("INSERT INTO authors (article_id, name) VALUES (1, 'Yazar, Ali')")
     conn.execute("INSERT INTO authors (article_id, name) VALUES (1, 'Yazar, Veli')")
     conn.execute("INSERT INTO authors (article_id, name) VALUES (2, 'Yazar, Ayşe')")
-    conn.execute(
-        "INSERT INTO citations (citing_article_id, cited_title, cited_doi, cited_openalex_id) "
-        "VALUES (1, 'Referans I', '10.5678/ref1', 'W111')"
-    )
-    conn.execute(
-        "INSERT INTO citations (citing_article_id, cited_title, cited_doi, cited_openalex_id) "
-        "VALUES (1, 'Referans II', NULL, 'W222')"
-    )
-    conn.execute(
-        "INSERT INTO citations (citing_article_id, cited_title, cited_doi, cited_openalex_id) "
-        "VALUES (2, 'Referans III', '10.5678/ref3', NULL)"
-    )
     conn.commit()
 
 
@@ -83,23 +71,13 @@ def test_export_all_articles_structure(tmp_path, conn):
     assert first["article_type"] == ""
     assert first["references"] == []
     assert first["metadata"] == []
-    assert len(first["citations"]) == 2
 
 
-def test_export_all_articles_citation_structure(tmp_path, conn):
-    _seed_db(conn)
-    out = export_all_articles(conn, tmp_path / "all.jsonl")
-    first = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
-    c = first["citations"][0]
-    assert c == {"title": "Referans I", "doi": "10.5678/ref1", "openalex_id": "W111"}
-
-
-def test_export_all_articles_no_citations(tmp_path, conn):
+def test_export_all_articles_no_doi(tmp_path, conn):
     _seed_db(conn)
     out = export_all_articles(conn, tmp_path / "all.jsonl")
     second = json.loads(out.read_text(encoding="utf-8").splitlines()[1])
     assert second["doi"] is None
-    assert len(second["citations"]) == 1
 
 
 def test_export_all_articles_sorted_by_slug(tmp_path, conn):

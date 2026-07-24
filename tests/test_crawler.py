@@ -8,7 +8,6 @@ import pytest
 
 from src.crawler import (
     download_pdf,
-    fetch_article_pdf_url,
     fetch_journals,
     harvest_all_journals,
     is_permanently_failed,
@@ -59,12 +58,6 @@ def test_fetch_journal_shortnames_extracts_slug():
     assert "test-dergi" in slugs
     assert "faq" not in slugs
     assert "baska" not in slugs
-
-
-async def _run(transport: httpx.MockTransport) -> list[str]:
-    async with httpx.AsyncClient(transport=transport) as client:
-        journals = await fetch_journals(client, max_pages=1)
-        return [j["short_name"] for j in journals]
 
 
 async def _run_journals(transport: httpx.MockTransport) -> list[dict]:
@@ -298,61 +291,6 @@ def test_parse_article_metadata_source_has_pub_slug():
     """
     meta = parse_article_metadata(xml)
     assert meta["journal_shortname"] == "dergixyz"
-
-
-# ---------------------------------------------------------------------------
-# fetch_article_pdf_url tests
-# ---------------------------------------------------------------------------
-
-def test_fetch_article_pdf_url_finds_download_link():
-    def handler(request: httpx.Request) -> httpx.Response:
-        html = """
-        <html><body>
-            <a href="/tr/download/article-file/5788429">PDF Indir</a>
-            <a href="/tr/pub/ihad/article/12345">View</a>
-        </body></html>
-        """
-        return httpx.Response(200, text=html)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
-    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
-    assert result is not None
-    assert "download/article-file" in result
-
-
-def test_fetch_article_pdf_url_finds_pdf_link():
-    def handler(request: httpx.Request) -> httpx.Response:
-        html = """
-        <html><body>
-            <a href="/tr/pub/ihad/article/12345/paper.pdf">PDF</a>
-        </body></html>
-        """
-        return httpx.Response(200, text=html)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
-    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
-    assert result is not None
-    assert result.endswith(".pdf")
-
-
-def test_fetch_article_pdf_url_no_pdf_found():
-    def handler(request: httpx.Request) -> httpx.Response:
-        html = "<html><body><a href='/view'>View</a></body></html>"
-        return httpx.Response(200, text=html)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
-    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
-    assert result is None
-
-
-def test_fetch_article_pdf_url_absolute_pdf_link():
-    def handler(request: httpx.Request) -> httpx.Response:
-        html = '<html><body><a href="https://cdn.example.com/paper.pdf">PDF</a></body></html>'
-        return httpx.Response(200, text=html)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://dergipark.org.tr")
-    result = asyncio.run(fetch_article_pdf_url(client, "https://dergipark.org.tr/en/pub/ihad/article/12345"))
-    assert result == "https://cdn.example.com/paper.pdf"
 
 
 # ---------------------------------------------------------------------------

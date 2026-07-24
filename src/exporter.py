@@ -35,7 +35,7 @@ def _json_loads(text: str | None) -> list | dict:
 
 
 def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
-    """Build a JSONL row dict for one article with authors and citations.
+    """Build a JSONL row dict for one article with authors.
 
     Args:
         conn: SQLite connection.
@@ -51,13 +51,6 @@ def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
             (article["id"],),
         ).fetchall()
     ]
-    citations = []
-    for c in conn.execute(
-        "SELECT cited_title, cited_doi, cited_openalex_id "
-        "FROM citations WHERE citing_article_id = ? ORDER BY id",
-        (article["id"],),
-    ).fetchall():
-        citations.append({"title": c[0], "doi": _normalize_doi(c[1]), "openalex_id": c[2]})
 
     oai_id = article.get("oai_identifier") or ""
     slug = article["journal_short"]
@@ -88,7 +81,6 @@ def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
         "orcid": _json_loads(article.get("orcid")),
         "article_type": article.get("article_type") or "",
         "references": _json_loads(article.get("references")),
-        "citations": citations,
         "metadata": _json_loads(article.get("metadata")),
     }
 
@@ -103,7 +95,7 @@ def export_all_articles(
     all metadata fields: slug, article_id, article_url, title, authors,
     journal_title, issn, publisher, volume, issue, firstpage, lastpage,
     pages, date, language, doi, abstract, is_oa, pdf_url, keywords,
-    orcid, article_type, references, citations, metadata.
+    orcid, article_type, references, metadata.
 
     Per-row error handling: if a single article fails to build, it is skipped
     and counted as failed. The export does not crash on bad data.

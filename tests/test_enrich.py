@@ -1,4 +1,4 @@
-"""Tests for src/enrich.py and src/storage.py insert_citation."""
+"""Tests for src/enrich.py (OpenAlex is_oa enrichment only)."""
 
 import asyncio
 
@@ -6,12 +6,10 @@ import httpx
 
 from src.enrich import (
     enrich_all_articles,
-    enrich_article_citations,
-    enrich_existing_citations,
+    enrich_article_is_oa,
     fetch_openalex_work,
-    fetch_openalex_work_by_id,
 )
-from src.storage import init_db, insert_article, insert_citation
+from src.storage import init_db, insert_article
 
 
 def _make_article(conn, title="Test Article", oai_id="oai:test:1", doi=None):
@@ -40,10 +38,7 @@ def _ok_handler(request: httpx.Request) -> httpx.Response:
         "id": "https://openalex.org/W123",
         "doi": "https://doi.org/10.1000/test",
         "cited_by_count": 5,
-        "referenced_works": [
-            "https://openalex.org/W456",
-            "https://openalex.org/W789",
-        ],
+        "referenced_works": [],
     }
     return httpx.Response(200, json=body)
 
@@ -51,11 +46,6 @@ def _ok_handler(request: httpx.Request) -> httpx.Response:
 def _not_found_handler(request: httpx.Request) -> httpx.Response:
     """Return empty results response."""
     return httpx.Response(200, json={"results": []})
-
-
-def _error_handler(request: httpx.Request) -> httpx.Response:
-    """Return 500 error response."""
-    return httpx.Response(500, text="Internal Server Error")
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +57,6 @@ def test_fetch_openalex_work_by_doi():
     result = asyncio.run(fetch_openalex_work(client, doi="10.1000/test"))
     assert result is not None
     assert result["id"] == "https://openalex.org/W123"
-    assert result["cited_by_count"] == 5
-    assert len(result["referenced_works"]) == 2
 
 
 def test_fetch_openalex_work_by_title():
@@ -78,7 +66,6 @@ def test_fetch_openalex_work_by_title():
     client = _make_client(handler)
     result = asyncio.run(fetch_openalex_work(client, title="Test Title"))
     assert result is not None
-    assert "referenced_works" in result
 
 
 def test_fetch_openalex_work_not_found():
@@ -110,260 +97,73 @@ def test_fetch_openalex_work_retry_on_error():
 
 
 # ---------------------------------------------------------------------------
-# fetch_openalex_work_by_id tests
+# enrich_article_is_oa tests
 # ---------------------------------------------------------------------------
 
-def test_fetch_openalex_work_by_id_found():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "id": "https://openalex.org/W123",
-            "doi": "https://doi.org/10.1000/test",
-            "title": "Test Title",
-        })
-
-    client = _make_client(handler)
-    result = asyncio.run(fetch_openalex_work_by_id(client, "W123"))
-    assert result is not None
-    assert result["doi"] == "https://doi.org/10.1000/test"
-    assert result["title"] == "Test Title"
-
-
-def test_fetch_openalex_work_by_id_not_found():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(404, text="Not Found")
-
-    client = _make_client(handler)
-    try:
-        result = asyncio.run(fetch_openalex_work_by_id(client, "W999"))
-    except Exception:
-        result = None
-    assert result is None
-
-
-def test_fetch_openalex_work_by_id_empty_doi():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "id": "https://openalex.org/W456",
-            "title": "No DOI Title",
-        })
-
-    client = _make_client(handler)
-    result = asyncio.run(fetch_openalex_work_by_id(client, "W456"))
-    assert result is not None
-    assert result["doi"] == ""
-    assert result["title"] == "No DOI Title"
-
-
-# ---------------------------------------------------------------------------
-# enrich_article_citations tests
-# ---------------------------------------------------------------------------
-
-def test_enrich_article_citations_writes_rows(tmp_path):
+def test_enrich_article_is_oa_open(tmp_path):
     conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich1")
-    client = _make_client(_ok_handler)
+    aid = _make_article(conn, doi="10.1000/test", oai_id="oai:test:oa1")
 
-    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.1000/test", "title": "Test"}, conn))
-    assert count == 2
-    assert isinstance(is_oa, int)
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "results": [{
+                "id": "https://openalex.org/W123",
+                "doi": "https://doi.org/10.1000/test",
+                "title": "Test",
+                "open_access": {"is_oa": True},
+            }],
+        })
 
-    rows = conn.execute(
-        "SELECT cited_openalex_id FROM citations WHERE citing_article_id = ?", (aid,)
-    ).fetchall()
-    cited_ids = {r[0] for r in rows}
-    assert cited_ids == {"W456", "W789"}
+    client = _make_client(handler)
+    result = asyncio.run(enrich_article_is_oa(client, aid, "10.1000/test", "Test"))
+    assert result == 1
     conn.close()
 
 
-def test_enrich_article_citations_no_work(tmp_path):
+def test_enrich_article_is_oa_closed(tmp_path):
     conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich2")
+    aid = _make_article(conn, doi="10.1000/closed", oai_id="oai:test:oa2")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "results": [{
+                "id": "https://openalex.org/W456",
+                "doi": "https://doi.org/10.1000/closed",
+                "title": "Closed",
+                "open_access": {"is_oa": False},
+            }],
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(enrich_article_is_oa(client, aid, "10.1000/closed", "Closed"))
+    assert result == 0
+    conn.close()
+
+
+def test_enrich_article_is_oa_not_found(tmp_path):
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, doi="10.9999/none", oai_id="oai:test:oa3")
     client = _make_client(_not_found_handler)
 
-    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/none", "title": ""}, conn))
-    assert count == 0
-    assert is_oa == 0
-    assert conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0] == 0
+    result = asyncio.run(enrich_article_is_oa(client, aid, "10.9999/none", ""))
+    assert result == 0
     conn.close()
 
 
-def test_enrich_article_citations_no_doi_no_title(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich3")
-    client = _make_client(_ok_handler)
-
-    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "", "title": ""}, conn))
-    assert count == 0
-    assert is_oa == 0
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# insert_citation roundtrip tests
-# ---------------------------------------------------------------------------
-
-def test_insert_citation_roundtrip(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:cite1")
-
-    row_id = insert_citation(
-        conn,
-        citing_article_id=aid,
-        cited_openalex_id="W987654",
-        cited_doi="10.1000/test",
-        cited_title="Test Cited",
-    )
-    assert row_id > 0
-    row = conn.execute(
-        "SELECT citing_article_id, cited_openalex_id, cited_doi, cited_title FROM citations WHERE id = ?",
-        (row_id,),
-    ).fetchone()
-    assert row[0] == aid
-    assert row[1] == "W987654"
-    assert row[2] == "10.1000/test"
-    assert row[3] == "Test Cited"
-    conn.close()
-
-
-def test_insert_citation_dedup(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:dedup1")
-
-    first = insert_citation(
-        conn,
-        citing_article_id=aid,
-        cited_openalex_id="W111",
-        cited_doi="10.1000/a",
-        cited_title="A",
-    )
-    second = insert_citation(
-        conn,
-        citing_article_id=aid,
-        cited_openalex_id="W111",
-        cited_doi="10.1000/a",
-        cited_title="A",
-    )
-    assert first == second
-    count = conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
-    assert count == 1
-    conn.close()
-
-
-def test_insert_citation_no_dedup_without_openalex_id(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:nodedup")
-
-    insert_citation(conn, citing_article_id=aid, cited_doi="10.1000/x")
-    insert_citation(conn, citing_article_id=aid, cited_doi="10.1000/x")
-    count = conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0]
-    assert count == 2
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# enrich_existing_citations tests
-# ---------------------------------------------------------------------------
-
-def test_enrich_existing_citations_updates_doi_and_title(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:enrich_cite1")
-
-    # cited_openalex_id set but cited_doi is NULL
-    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W777")
-    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
-    conn.commit()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "id": "https://openalex.org/W777",
-            "doi": "https://doi.org/10.1000/enriched",
-            "title": "Enriched Title",
-        })
-
-    client = _make_client(handler)
-    result = asyncio.run(enrich_existing_citations(client, conn))
-
-    assert result["enriched"] == 1
-    row = conn.execute("SELECT cited_doi, cited_title FROM citations WHERE id = ?", (cid,)).fetchone()
-    assert row[0] == "https://doi.org/10.1000/enriched"
-    assert row[1] == "Enriched Title"
-    conn.close()
-
-
-def test_enrich_existing_citations_links_to_our_db(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:enrich_cite2")
-
-    # Reference an article in our DB
-    target_id = _make_article(conn, title="Target Article", oai_id="oai:test:target")
-    conn.execute("UPDATE articles SET doi = '10.9999/target' WHERE id = ?", (target_id,))
-    conn.commit()
-
-    # Create citation with empty DOI
-    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W888")
-    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
-    conn.commit()
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "id": "https://openalex.org/W888",
-            "doi": "https://doi.org/10.9999/target",
-            "title": "Target Article",
-        })
-
-    client = _make_client(handler)
-    result = asyncio.run(enrich_existing_citations(client, conn))
-
-    assert result["enriched"] == 1
-    assert result["linked_to_our_db"] == 1
-    row = conn.execute("SELECT cited_article_id, cited_doi FROM citations WHERE id = ?", (cid,)).fetchone()
-    assert row[0] == target_id
-    assert row[1] == "https://doi.org/10.9999/target"
-    conn.close()
-
-
-def test_enrich_existing_citations_skips_already_enriched(tmp_path):
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:enrich_cite3")
-
-    # cited_doi already set — should be skipped
-    insert_citation(conn, citing_article_id=aid, cited_openalex_id="W999", cited_doi="10.1000/already")
-
-    client = _make_client(lambda r: httpx.Response(200, json={}))
-    result = asyncio.run(enrich_existing_citations(client, conn))
-
-    assert result["enriched"] == 0
-    conn.close()
-
-
-def test_enrich_article_citations_404_does_not_raise(tmp_path):
+def test_enrich_article_is_oa_404(tmp_path):
     """404 errors are handled as debug logs, not exceptions."""
     conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich404")
+    aid = _make_article(conn, doi="10.9999/missing", oai_id="oai:test:oa404")
     client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
 
-    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/missing", "title": ""}, conn))
-    assert count == 0
-    assert is_oa == 0
+    result = asyncio.run(enrich_article_is_oa(client, aid, "10.9999/missing", ""))
+    assert result == 0
     conn.close()
 
 
-def test_enrich_existing_citations_404_does_not_raise(tmp_path):
-    """404 errors during enrichment are marked, not raised."""
-    conn = init_db(str(tmp_path / "test.db"))
-    aid = _make_article(conn, oai_id="oai:test:enrich_cite404")
-    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="WMISSING")
-    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
-    conn.commit()
-
-    client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
-    result = asyncio.run(enrich_existing_citations(client, conn))
-
-    # 404 = not found, marked as enriched (prevents infinite loop)
-    assert result["enriched"] == 1
-    assert result["failed"] == 0
-    conn.close()
-
+# ---------------------------------------------------------------------------
+# enrich_all_articles tests
+# ---------------------------------------------------------------------------
 
 def test_enrich_all_articles_skips_already_enriched(tmp_path):
     """Articles with enriched_at set are skipped."""
@@ -371,7 +171,6 @@ def test_enrich_all_articles_skips_already_enriched(tmp_path):
     _make_article(conn, oai_id="oai:test:enriched1", doi="10.1111/done")
     _make_article(conn, oai_id="oai:test:notdone1", doi="10.2222/todo")
 
-    # Mark first article as enriched
     conn.execute(
         "UPDATE articles SET enriched_at = datetime('now') WHERE oai_identifier = ?",
         ("oai:test:enriched1",),
@@ -388,14 +187,13 @@ def test_enrich_all_articles_skips_already_enriched(tmp_path):
                 "id": "https://openalex.org/W123",
                 "doi": "https://doi.org/10.2222/todo",
                 "title": "Test",
-                "referenced_works": [],
+                "open_access": {"is_oa": True},
             }],
         })
 
     client = _make_client(handler)
     result = asyncio.run(enrich_all_articles(client, conn, concurrency=1, batch_size=50))
 
-    # Only 1 article processed (the one without enriched_at)
     assert result["enriched"] == 1
     assert call_count == 1
     conn.close()

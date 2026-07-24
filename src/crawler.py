@@ -136,7 +136,7 @@ async def harvest_all_journals(
     max_records_per_journal: int = 20,
     inter_request_delay: float = 1.5,
     adaptive_delay: AdaptiveDelay | None = None,
-    on_journal_done: Callable[[str, list[str]], None] | None = None,
+    on_journal_done: Callable[[str, list[str], bool], None] | None = None,
 ) -> dict[str, list[str]] | None:
     """Harvest OAI-PMH ListRecords XML for all journals concurrently.
 
@@ -150,7 +150,7 @@ async def harvest_all_journals(
         max_records_per_journal: Max records to fetch per journal.
         inter_request_delay: Base delay between requests in seconds (+/- 30% jitter).
         adaptive_delay: AdaptiveDelay instance for 429 backoff.
-        on_journal_done: Callback invoked as on_journal_done(shortname, xml_pages).
+        on_journal_done: Callback invoked as on_journal_done(shortname, xml_pages, success).
 
     Returns:
         Dict mapping shortname to list of XML page strings (streaming mode returns None).
@@ -164,6 +164,7 @@ async def harvest_all_journals(
     async def _harvest_one(shortname: str, index: int) -> None:
         nonlocal completed
         xml_pages: list[str] = []
+        harvest_success = False
         async with semaphore:
             delay = adaptive_delay.get(shortname) if adaptive_delay else inter_request_delay
             await asyncio.sleep(random.uniform(delay * 0.7, delay * 1.3))
@@ -212,13 +213,15 @@ async def harvest_all_journals(
                     url = (
                         f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={token}"
                     )
+                harvest_success = True
             except Exception as exc:  # Permanent error after retry
                 if adaptive_delay and "429" in str(exc):
                     adaptive_delay.on_429(shortname)
                 logger.error("Journal '{}' harvest failed: {}", shortname, exc)
+                xml_pages.clear()  # Don't process partial data
             finally:
                 if on_journal_done is not None:
-                    on_journal_done(shortname, xml_pages)
+                    on_journal_done(shortname, xml_pages, success=harvest_success)
                 else:
                     results[shortname] = xml_pages
                 completed += 1
@@ -385,48 +388,6 @@ def parse_article_metadata(xml_text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 PDF_ERRORS_PATH = Path("data/pdf_errors.json")
-
-
-@retry(max_attempts=3, backoff=1.0)
-async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> str | None:
-    """Extract PDF download URL from a DergiPark article detail page.
-
-    Searches for links in priority order:
-    1. /download/article-file/{id} (most common pattern)
-    2. Links containing 'download' with .pdf extension
-    3. Any .pdf extension link
-    4. Any link containing .pdf
-
-    Args:
-        client: Async HTTP client.
-        article_url: Full URL of the article detail page.
-
-    Returns:
-        Absolute PDF URL if found, None otherwise.
-    """
-    logger.debug("Fetching PDF link: {}", article_url)
-    resp = await client.get(
-        article_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
-    )
-    resp.raise_for_status()
-
-    tree = HTMLParser(resp.text)
-
-    # Single pass: collect all hrefs and rank by priority
-    best: str | None = None
-    best_priority = 999
-    for anchor in tree.css("a"):
-        href = anchor.attributes.get("href") or ""
-        if not href:
-            continue
-        priority = _pdf_link_priority(href)
-        if priority < best_priority:
-            best = href
-            best_priority = priority
-            if priority == 0:
-                break
-
-    return _resolve_pdf_url(article_url, best) if best else None
 
 
 def scrape_article_html_metadata(html: str) -> dict:

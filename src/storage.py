@@ -11,17 +11,6 @@ def _json_dumps(obj: list) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
-def _json_loads(text: str | None) -> list:
-    """Deserialize a JSON string to list, returning [] on failure."""
-    if not text:
-        return []
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, list) else []
-    except (json.JSONDecodeError, TypeError):
-        return []
-
-
 def init_db(path: str | Path) -> sqlite3.Connection:
     """Initialize the database schema and return a connection.
 
@@ -55,6 +44,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             short_name   TEXT UNIQUE NOT NULL,
             name         TEXT,
+            article_count INTEGER DEFAULT 0,
             created_at   TEXT DEFAULT (datetime('now'))
         );
 
@@ -95,18 +85,6 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             created_at  TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (article_id) REFERENCES articles(id)
         );
-
-        CREATE TABLE IF NOT EXISTS citations (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            citing_article_id   INTEGER NOT NULL,
-            cited_article_id    INTEGER,
-            cited_openalex_id   TEXT,
-            cited_doi           TEXT,
-            cited_title         TEXT,
-            created_at          TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (citing_article_id) REFERENCES articles(id),
-            FOREIGN KEY (cited_article_id) REFERENCES articles(id)
-        );
         """
     )
 
@@ -114,11 +92,6 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
     if "oai_identifier" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN oai_identifier TEXT")
-
-    # cited_openalex_id column may be missing; add it
-    cit_cols = {row[1] for row in conn.execute("PRAGMA table_info(citations)").fetchall()}
-    if "cited_openalex_id" not in cit_cols:
-        conn.execute("ALTER TABLE citations ADD COLUMN cited_openalex_id TEXT")
 
     # enriched_at column may be missing; add it
     if "enriched_at" not in cols:
@@ -196,11 +169,15 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     if "is_oa" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN is_oa INTEGER")
 
+    # article_count column may be missing in journals; add it
+    journal_cols = {row[1] for row in conn.execute("PRAGMA table_info(journals)").fetchall()}
+    if "article_count" not in journal_cols:
+        conn.execute("ALTER TABLE journals ADD COLUMN article_count INTEGER DEFAULT 0")
+
     # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_citations_citing ON citations(citing_article_id)")
 
     conn.commit()
     return conn
@@ -235,6 +212,21 @@ def _resolve_journal(conn: sqlite3.Connection, short_name: str, name: str = "") 
         (short_name, name),
     )
     return cur.lastrowid
+
+
+def update_journal_article_count(conn: sqlite3.Connection, short_name: str, count: int) -> None:
+    """Update the article count for a journal.
+
+    Args:
+        conn: SQLite connection.
+        short_name: Journal short name (slug).
+        count: Number of articles found in this journal.
+    """
+    conn.execute(
+        "UPDATE journals SET article_count = ? WHERE short_name = ?",
+        (count, short_name),
+    )
+    conn.commit()
 
 
 def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
@@ -378,77 +370,4 @@ def _write_authors(conn: sqlite3.Connection, article_id: int, authors: list) -> 
         )
 
 
-def insert_citation(
-    conn: sqlite3.Connection,
-    *,
-    citing_article_id: int,
-    cited_openalex_id: str | None = None,
-    cited_doi: str | None = None,
-    cited_title: str | None = None,
-) -> int:
-    """Insert a citation row, deduplicating by (citing_article_id, cited_openalex_id).
 
-    If cited_openalex_id is provided and a duplicate exists, returns the
-    existing row ID. Without cited_openalex_id, no dedup is performed.
-
-    Args:
-        conn: SQLite connection.
-        citing_article_id: ID of the citing article.
-        cited_openalex_id: OpenAlex work ID of the cited work.
-        cited_doi: DOI of the cited work.
-        cited_title: Title of the cited work.
-
-    Returns:
-        Row ID of the inserted or existing citation.
-    """
-    if citing_article_id is None:
-        return -1
-
-    openalex_id = (cited_openalex_id or "").strip()
-    doi = (cited_doi or "").strip()
-    title = (cited_title or "").strip()
-
-    # Dedup: if same citing + cited_openalex_id exists, return existing row
-    if openalex_id:
-        row = conn.execute(
-            "SELECT id FROM citations WHERE citing_article_id = ? AND cited_openalex_id = ?",
-            (citing_article_id, openalex_id),
-        ).fetchone()
-        if row:
-            return row[0]
-
-    cur = conn.execute(
-        """
-        INSERT INTO citations (citing_article_id, cited_article_id, cited_openalex_id, cited_doi, cited_title)
-        VALUES (?, NULL, ?, ?, ?)
-        """,
-        (citing_article_id, openalex_id or None, doi or None, title or None),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def resolve_citation_targets(conn: sqlite3.Connection, *, cited_doi: str = "") -> int | None:
-    """Find an article in our database matching the given DOI.
-
-    Normalizes the DOI by removing https://doi.org/ prefix.
-
-    Args:
-        conn: SQLite connection.
-        cited_doi: DOI string to look up.
-
-    Returns:
-        Matching article row ID, or None if not found.
-    """
-    doi = (cited_doi or "").strip()
-    if not doi:
-        return None
-    # Normalize: https://doi.org/10.xxx -> 10.xxx
-    if doi.startswith("https://doi.org/"):
-        doi = doi[len("https://doi.org/") :]
-    elif doi.startswith("http://doi.org/"):
-        doi = doi[len("http://doi.org/") :]
-    elif doi.startswith("doi.org/"):
-        doi = doi[len("doi.org/") :]
-    row = conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone()
-    return row[0] if row else None

@@ -1,13 +1,13 @@
 """Dergipark-miner main orchestrator.
 
 Pipeline: discover journals -> OAI-PMH harvest -> parse -> SQLite ->
-PDF download -> OpenAlex enrichment -> JSONL export.
+PDF download + HTML metadata -> OpenAlex is_oa -> JSONL export.
 
 Resumes from checkpoint. Handles Ctrl+C gracefully.
 
 Usage:
     python main.py                  # full pipeline
-    python main.py --skip-enrich    # skip OpenAlex enrichment
+    python main.py --skip-enrich    # skip OpenAlex is_oa enrichment
     python main.py --limit 50       # max 50 journals
     python main.py --limit 0        # unlimited journals
 """
@@ -37,9 +37,9 @@ from src.crawler import (
     remove_pdf_error,
     scrape_article_html_metadata,
 )
-from src.enrich import enrich_all_articles, enrich_existing_citations
+from src.enrich import enrich_all_articles
 from src.exporter import export_all_articles
-from src.storage import init_db, insert_article, insert_journals
+from src.storage import init_db, insert_article, insert_journals, update_journal_article_count
 from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger
 
 CHECKPOINT_PATH = Path("checkpoint.json")
@@ -274,25 +274,32 @@ async def _run_pipeline(
         logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
     max_per_journal = 999999
 
-    def on_journal_done(shortname: str, xml_pages: list[str]) -> None:
+    def on_journal_done(shortname: str, xml_pages: list[str], success: bool = True) -> None:
         """Called when each journal harvest completes: parse XML and write to DB."""
         nonlocal processed_articles
+        journal_article_count = 0
         for xml_text in xml_pages:
             for record_xml in _split_records(xml_text):
                 try:
                     meta = parse_article_metadata(record_xml)
                     insert_article(conn, meta)
                     processed_articles += 1
+                    journal_article_count += 1
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
 
-        if xml_pages:
+        if success and xml_pages:
+            # Harvest completed successfully — mark as processed
             processed_shortnames.append(shortname)
             if shortname in failed_journals:
                 del failed_journals[shortname]
+            # Store per-journal article count
+            update_journal_article_count(conn, shortname, journal_article_count)
         else:
+            # Harvest failed or returned no data — NOT added to processed_shortnames
+            # Will be retried on next run
             if shortname not in failed_journals:
-                failed_journals[shortname] = "no records returned"
+                failed_journals[shortname] = "harvest failed" if not success else "no records returned"
 
         ckpt.update(
             {
@@ -516,7 +523,7 @@ async def _run_pipeline(
         logger.info("OpenAlex enrichment skipped (--skip-enrich)")
     else:
 
-        def on_enrich_batch(done, citations, failed):
+        def on_enrich_batch(done, failed):
             ckpt["enriched_count"] = done
             _save_ckpt(ckpt)
 
@@ -531,32 +538,14 @@ async def _run_pipeline(
             ckpt["enriched_count"] = result["enriched"]
             _save_ckpt(ckpt)
             logger.info(
-                "Enrichment done: enriched={}, citations={}, failed={}",
+                "Enrichment done: enriched={}, failed={}",
                 result["enriched"],
-                result["citations_added"],
                 result["failed"],
             )
         except Exception:
             logger.exception("Enrichment error")
 
-    # 6. Citation DOI resolution
-    try:
-        result2 = await enrich_existing_citations(
-            client,
-            conn,
-            concurrency=3,
-            batch_size=100,
-        )
-        logger.info(
-            "Citation enrichment done: enriched={}, linked={}, failed={}",
-            result2["enriched"],
-            result2["linked_to_our_db"],
-            result2["failed"],
-        )
-    except Exception:
-        logger.exception("Citation enrichment error")
-
-    # 7. Export
+    # 6. Export
     try:
         export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
         logger.info("Export done: data/exports/all_articles.jsonl")
