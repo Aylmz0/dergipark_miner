@@ -1,6 +1,8 @@
 """dergipark-miner ana orkestrasyon dosyasi.
 
-DergiOAI cek -> parse et -> SQLite'a yaz -> OpenAlex ile zenginlestir.
+Dergi listesini kesfet -> OAI ham XML cek -> parse et -> SQLite'a yaz ->
+PDF indir -> OpenAlex ile zenginlestir -> JSONL export.
+
 Checkpoint ile kaldigi yerden devam eder.
 
 Kullanim:
@@ -19,7 +21,6 @@ sys.path.insert(0, str(_root))
 
 import httpx  # noqa: E402
 from loguru import logger  # noqa: E402
-from tqdm import tqdm  # noqa: E402
 
 from src.crawler import (  # noqa: E402
     DEFAULT_USER_AGENT,
@@ -41,27 +42,32 @@ from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_log
 CHECKPOINT_PATH = Path("checkpoint.json")
 
 
+def _save_ckpt(ckpt: dict) -> None:
+    """Checkpoint'i guvenli sekilde kaydeder."""
+    try:
+        save_checkpoint(CHECKPOINT_PATH, state=ckpt)
+    except Exception:
+        logger.warning("Checkpoint yazilamadi")
+
+
 async def run(skip_enrich: bool = False, limit: int = 0):
     setup_logger()
     logger.info("=== dergipark-miner baslatildi ===")
 
     # Checkpoint yukle
-    try:
-        ckpt = load_checkpoint(CHECKPOINT_PATH)
-        processed_shortnames: list[str] = ckpt.get("processed_shortnames", [])
-        processed_articles: int = ckpt.get("processed_articles", 0)
-        failed_journals: list[str] = ckpt.get("failed_journals", [])
-        failed_articles: list[dict] = ckpt.get("failed_articles", [])
-    except Exception:
-        logger.warning("Checkpoint okunamadi, bastan basliyor")
-        processed_shortnames = []
-        processed_articles = 0
-        failed_journals = []
-        failed_articles = []
+    ckpt = load_checkpoint(CHECKPOINT_PATH)
+    discovered_journals: list[str] = ckpt.get("discovered_journals", [])
+    processed_shortnames: list[str] = ckpt.get("processed_shortnames", [])
+    failed_journals: dict[str, str] = ckpt.get("failed_journals", {})
+    failed_articles: list[dict] = ckpt.get("failed_articles", [])
+    processed_articles: int = ckpt.get("processed_articles", 0)
+    pdf_downloaded: int = ckpt.get("pdf_downloaded", 0)
+    pdf_failed: int = ckpt.get("pdf_failed", 0)
 
     if processed_shortnames:
         logger.info(
-            "Checkpoint yuklendi: {} dergi islenmis, {} makale",
+            "Checkpoint yuklendi: {} dergi kesfedildi, {} islenmis, {} makale",
+            len(discovered_journals),
             len(processed_shortnames),
             processed_articles,
         )
@@ -76,14 +82,21 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         headers={"User-Agent": DEFAULT_USER_AGENT},
         timeout=httpx.Timeout(60.0),
     ) as client:
-        # 2. Dergi listesini kesfet + DB'ye kaydet
+        # 2. Dergi listesini kesfet (otomatik pagination)
         try:
-            all_journals = await fetch_journals(client, max_pages=1)
+            all_journals = await fetch_journals(client)
+            discovered_journals = [j["short_name"] for j in all_journals]
             insert_journals(conn, all_journals)
+            ckpt["discovered_journals"] = discovered_journals
+            _save_ckpt(ckpt)
             logger.info("Dergi listesi: {} dergi bulundu, DB'ye kaydedildi", len(all_journals))
         except Exception:
-            logger.exception("Dergi listesi cekilemedi; ornek liste kullaniyor")
-            all_journals = [{"short_name": "ihad", "name": ""}]
+            logger.exception("Dergi listesi cekilemedi")
+            if not discovered_journals:
+                all_journals = [{"short_name": "ihad", "name": ""}]
+                discovered_journals = ["ihad"]
+            else:
+                all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
 
         # Checkpoint'te islenmis dergileri atla
         remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
@@ -105,58 +118,56 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         if ckpt.get("adaptive_delays"):
             adaptive_delay = AdaptiveDelay.from_dict(ckpt["adaptive_delays"])
 
-        # 3. OAI ham XML cek
+        # 3. OAI ham XML cek + parse + insert (streaming)
         remaining_names = [j["short_name"] for j in remaining]
         max_per_journal = limit if limit > 0 else 999999
+
+        def on_journal_done(shortname: str, xml_pages: list[str]):
+            """Her dergi bitince cagrilir: XML'leri parse edip DB'ye yazar."""
+            nonlocal processed_articles
+            for xml_text in xml_pages:
+                try:
+                    meta = parse_article_metadata(xml_text)
+                    insert_article(conn, meta)
+                    processed_articles += 1
+                except Exception as exc:
+                    failed_articles.append({"shortname": shortname, "error": str(exc)})
+
+            processed_shortnames.append(shortname)
+            if shortname in failed_journals:
+                del failed_journals[shortname]
+            ckpt.update(
+                {
+                    "processed_shortnames": processed_shortnames,
+                    "processed_articles": processed_articles,
+                    "failed_journals": failed_journals,
+                    "failed_articles": failed_articles,
+                    "adaptive_delays": adaptive_delay.to_dict(),
+                }
+            )
+            _save_ckpt(ckpt)
+
         try:
-            results = await harvest_all_journals(
+            await harvest_all_journals(
                 client,
                 remaining_names,
                 concurrency=1,
                 max_records_per_journal=max_per_journal,
                 inter_request_delay=2.0,
                 adaptive_delay=adaptive_delay,
+                on_journal_done=on_journal_done,
             )
-            logger.info("Harvest tamamlandi: {} dergi", len(results))
+            logger.info("Harvest tamamlandi: {} makale toplam", processed_articles)
         except Exception:
             logger.exception("Harvest basarisiz")
-            results = {}
 
-        # 4. Parse + insert + checkpoint
-        total = processed_articles
-        for shortname, xml_pages in results.items():
-            for xml_text in tqdm(xml_pages, desc=f"{shortname}", leave=False):
-                try:
-                    meta = parse_article_metadata(xml_text)
-                    insert_article(conn, meta)
-                    total += 1
-                except Exception as exc:
-                    failed_articles.append(
-                        {
-                            "shortname": shortname,
-                            "error": str(exc),
-                        }
-                    )
-                    logger.debug("Parse/insert hatasi: {}", shortname)
+        # Basarisiz dergileri isaret
+        for shortname in remaining_names:
+            if shortname not in processed_shortnames and shortname not in failed_journals:
+                failed_journals[shortname] = "harvest incomplete"
+        _save_ckpt(ckpt)
 
-            processed_shortnames.append(shortname)
-            try:
-                save_checkpoint(
-                    CHECKPOINT_PATH,
-                    state={
-                        "processed_shortnames": processed_shortnames,
-                        "processed_articles": total,
-                        "failed_journals": failed_journals,
-                        "failed_articles": failed_articles,
-                        "adaptive_delays": adaptive_delay.to_dict(),
-                    },
-                )
-            except Exception:
-                logger.warning("Checkpoint yazilamadi")
-
-        logger.info("Makaleler yazildi: {}", total)
-
-        # 4b. PDF indirme (sinirsiz + retry from error log)
+        # 4. PDF indirme
         try:
             articles = conn.execute(
                 """
@@ -165,8 +176,6 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 JOIN journals j ON a.journal_id = j.id
                 """
             ).fetchall()
-            pdf_downloaded = 0
-            pdf_failed = 0
 
             # Once hata listesinden retry et
             pdf_errors = load_pdf_errors()
@@ -174,14 +183,15 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 oai_id = entry.get("oai_id", "")
                 if is_permanently_failed(oai_id, max_retries=3):
                     continue
-                # Makaleyi bul
                 row = conn.execute(
-                    "SELECT a.id, j.short_name FROM articles a JOIN journals j ON a.journal_id = j.id WHERE a.oai_identifier = ?",
+                    "SELECT a.id, j.short_name FROM articles a "
+                    "JOIN journals j ON a.journal_id = j.id "
+                    "WHERE a.oai_identifier = ?",
                     (oai_id,),
                 ).fetchone()
                 if not row:
                     continue
-                article_id, journal = row
+                _, journal = row
                 article_url = (
                     f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
                 )
@@ -235,6 +245,9 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                     log_pdf_error(oai_id, article_url, str(exc))
                     pdf_failed += 1
 
+            ckpt["pdf_downloaded"] = pdf_downloaded
+            ckpt["pdf_failed"] = pdf_failed
+            _save_ckpt(ckpt)
             logger.info("PDF indirme: {} basarili, {} basarisiz", pdf_downloaded, pdf_failed)
         except Exception:
             logger.exception("PDF indirme hatasi")
@@ -243,8 +256,21 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         if skip_enrich:
             logger.info("OpenAlex zenginlestirme atlandi (--skip-enrich)")
         else:
+
+            def on_enrich_batch(done, citations, failed):
+                ckpt["enriched_count"] = done
+                _save_ckpt(ckpt)
+
             try:
-                result = await enrich_all_articles(client, conn, concurrency=3, batch_size=50)
+                result = await enrich_all_articles(
+                    client,
+                    conn,
+                    concurrency=3,
+                    batch_size=50,
+                    on_batch_done=on_enrich_batch,
+                )
+                ckpt["enriched_count"] = result["enriched"]
+                _save_ckpt(ckpt)
                 logger.info(
                     "Zenginlestirme: enriched={}, citations={}, failed={}",
                     result["enriched"],
@@ -257,7 +283,10 @@ async def run(skip_enrich: bool = False, limit: int = 0):
             # 6. Citation DOI/baglanti zenginlestirme
             try:
                 result2 = await enrich_existing_citations(
-                    client, conn, concurrency=3, batch_size=100
+                    client,
+                    conn,
+                    concurrency=3,
+                    batch_size=100,
                 )
                 logger.info(
                     "Citation zenginlestirme: enriched={}, linked={}, failed={}",
@@ -276,19 +305,7 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         logger.exception("Export hatasi")
 
     # Son checkpoint
-    try:
-        save_checkpoint(
-            CHECKPOINT_PATH,
-            state={
-                "processed_shortnames": processed_shortnames,
-                "processed_articles": total,
-                "failed_journals": failed_journals,
-                "failed_articles": failed_articles,
-                "adaptive_delays": adaptive_delay.to_dict(),
-            },
-        )
-    except Exception:
-        logger.warning("Son checkpoint yazilamadi")
+    _save_ckpt(ckpt)
 
     conn.close()
     logger.info("=== dergipark-miner bitti ===")

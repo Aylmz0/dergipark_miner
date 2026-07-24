@@ -116,64 +116,90 @@ async def enrich_all_articles(
     *,
     concurrency: int = 3,
     batch_size: int = 50,
+    max_total: int = 0,
+    on_batch_done=None,
 ) -> dict:
     """Tum makaleleri OpenAlex uzerinden zenginlestirir (referans/atif cekme).
 
-    articles tablosundan (id, doi, title) LIMIT batch_size ceker.
-    Her makale icin enrich_article_citations'ı semaphore ile cagirir.
+    articles tablosundan (id, doi, title) WHERE enriched_at IS NULL ceker.
+    while loop ile tum makaleler islenene kadar devam eder.
+    on_batch_done(enriched, citations_added, failed) callback ile checkpoint saglanir.
+    max_total > 0 ise o kadar makale islenir ve durur.
     Donus: {enriched: N, citations_added: M, failed: K}
     """
     sem = asyncio.Semaphore(concurrency)
+    total_enriched = 0
+    total_citations = 0
+    total_failed = 0
 
-    rows = conn.execute(
-        "SELECT id, doi, title FROM articles WHERE enriched_at IS NULL LIMIT ?", (batch_size,)
-    ).fetchall()
-    if not rows:
-        logger.info("Zenginlestirilecek makale yok")
-        return {"enriched": 0, "citations_added": 0, "failed": 0}
+    while True:
+        if max_total > 0:
+            remaining = max_total - total_enriched
+            if remaining <= 0:
+                break
+            current_batch = min(batch_size, remaining)
+        else:
+            current_batch = batch_size
 
-    logger.info("Zenginlestirme basliyor: {} makale (concurrency={})", len(rows), concurrency)
+        rows = conn.execute(
+            "SELECT id, doi, title FROM articles WHERE enriched_at IS NULL LIMIT ?",
+            (current_batch,),
+        ).fetchall()
+        if not rows:
+            break
 
-    enriched = 0
-    citations_added = 0
-    failed = 0
+        logger.info("Zenginlestirme batch: {} makale (toplam: {})", len(rows), total_enriched)
 
-    async def _process(article_id: int, doi: str, title: str):
-        nonlocal enriched, citations_added, failed
-        async with sem:
-            try:
-                count = await enrich_article_citations(
-                    client, article_id, {"doi": doi, "title": title}, conn
-                )
-                conn.execute(
-                    "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
-                    (article_id,),
-                )
-                conn.commit()
-                enriched += 1
-                citations_added += count
-                logger.debug("Makale {} -> {} referans", article_id, count)
-                await asyncio.sleep(0.15)  # rate-limit
-            except httpx.HTTPStatusError as exc:
-                failed += 1
-                if exc.response.status_code == 404:
-                    logger.debug("Makale {} OpenAlex'de bulunamadi", article_id)
-                else:
-                    logger.warning("Makale {} zenginlestirilemedi: {}", article_id, exc)
-            except Exception:
-                failed += 1
-                logger.exception("Makale {} zenginlestirilemedi", article_id)
+        enriched = 0
+        citations_added = 0
+        failed = 0
 
-    tasks = [_process(aid, doi or "", title or "") for aid, doi, title in rows]
-    await asyncio.gather(*tasks, return_exceptions=True)
+        async def _process(article_id: int, doi: str, title: str):
+            nonlocal enriched, citations_added, failed
+            async with sem:
+                try:
+                    count = await enrich_article_citations(
+                        client, article_id, {"doi": doi, "title": title}, conn
+                    )
+                    conn.execute(
+                        "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
+                        (article_id,),
+                    )
+                    conn.commit()
+                    enriched += 1
+                    citations_added += count
+                    await asyncio.sleep(0.15)
+                except httpx.HTTPStatusError as exc:
+                    # 404 bile olsa isaretledik (OpenAlex'de yok)
+                    conn.execute(
+                        "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
+                        (article_id,),
+                    )
+                    conn.commit()
+                    enriched += 1
+                    if exc.response.status_code != 404:
+                        logger.warning("Makale {} zenginlestirilemedi: {}", article_id, exc)
+                except Exception:
+                    failed += 1
+                    logger.exception("Makale {} zenginlestirilemedi", article_id)
+
+        tasks = [_process(aid, doi or "", title or "") for aid, doi, title in rows]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        total_enriched += enriched
+        total_citations += citations_added
+        total_failed += failed
+
+        if on_batch_done:
+            on_batch_done(total_enriched, total_citations, total_failed)
 
     logger.info(
         "Zenginlestirme tamamlandi: enriched={}, citations={}, failed={}",
-        enriched,
-        citations_added,
-        failed,
+        total_enriched,
+        total_citations,
+        total_failed,
     )
-    return {"enriched": enriched, "citations_added": citations_added, "failed": failed}
+    return {"enriched": total_enriched, "citations_added": total_citations, "failed": total_failed}
 
 
 async def enrich_existing_citations(
@@ -182,83 +208,115 @@ async def enrich_existing_citations(
     *,
     concurrency: int = 3,
     batch_size: int = 100,
+    max_total: int = 0,
+    on_batch_done=None,
 ) -> dict:
     """Mevcut citations satirlarini OpenAlex ile zenginlestirir (DOI/title cozme).
 
     cited_openalex_id dolu ama cited_doi BOŞ olan citation'lari ceker.
-    Her biri icin fetch_openalex_work_by_id ile DOI/title bilgisini ceker,
-    citations satirini UPDATE eder, ve bizim DB'mizde eslesme varsa
-    cited_article_id'yi baglar.
-
+    while loop ile tum citation'lar islenene kadar devam eder.
     Donus: {enriched: N, linked_to_our_db: K, failed: M}
     """
     sem = asyncio.Semaphore(concurrency)
+    total_enriched = 0
+    total_linked = 0
+    total_failed = 0
 
-    rows = conn.execute(
-        """
-        SELECT id, cited_openalex_id FROM citations
-        WHERE cited_openalex_id IS NOT NULL AND cited_openalex_id != ''
-          AND (cited_doi IS NULL OR cited_doi = '')
-        LIMIT ?
-        """,
-        (batch_size,),
-    ).fetchall()
+    while True:
+        if max_total > 0:
+            remaining = max_total - total_enriched
+            if remaining <= 0:
+                break
+            current_batch = min(batch_size, remaining)
+        else:
+            current_batch = batch_size
 
-    if not rows:
-        logger.info("Zenginlestirilecek citation yok")
-        return {"enriched": 0, "linked_to_our_db": 0, "failed": 0}
+        rows = conn.execute(
+            """
+            SELECT id, cited_openalex_id FROM citations
+            WHERE cited_openalex_id IS NOT NULL AND cited_openalex_id != ''
+              AND (cited_doi IS NULL OR cited_doi = '')
+            LIMIT ?
+            """,
+            (current_batch,),
+        ).fetchall()
 
-    logger.info(
-        "Citation zenginlestirme basliyor: {} satir (concurrency={})", len(rows), concurrency
-    )
+        if not rows:
+            break
 
-    enriched = 0
-    linked = 0
-    failed = 0
+        logger.info(
+            "Citation zenginlestirme batch: {} satir (toplam: {})", len(rows), total_enriched
+        )
 
-    async def _process(citation_id: int, openalex_id: str):
-        nonlocal enriched, linked, failed
-        async with sem:
-            try:
-                info = await fetch_openalex_work_by_id(client, openalex_id)
-                if not info:
+        enriched = 0
+        linked = 0
+        failed = 0
+
+        async def _process(citation_id: int, openalex_id: str):
+            nonlocal enriched, linked, failed
+            async with sem:
+                try:
+                    info = await fetch_openalex_work_by_id(client, openalex_id)
+                    if not info:
+                        # Bulunamadi — isaretledik ki tekrar denemesin
+                        conn.execute(
+                            "UPDATE citations SET cited_doi = '__not_found__' WHERE id = ?",
+                            (citation_id,),
+                        )
+                        conn.commit()
+                        failed += 1
+                        return
+
+                    doi = info.get("doi") or ""
+                    title = info.get("title") or ""
+
+                    article_id = None
+                    if doi:
+                        article_id = resolve_citation_targets(conn, cited_doi=doi)
+
+                    conn.execute(
+                        "UPDATE citations SET cited_doi = ?, cited_title = ?, cited_article_id = ? WHERE id = ?",
+                        (doi or None, title or None, article_id, citation_id),
+                    )
+                    conn.commit()
+                    enriched += 1
+                    if article_id:
+                        linked += 1
+                    await asyncio.sleep(0.15)
+                except httpx.HTTPStatusError as exc:
+                    # 404 bile olsa isaretledik
+                    conn.execute(
+                        "UPDATE citations SET cited_doi = '__not_found__' WHERE id = ?",
+                        (citation_id,),
+                    )
+                    conn.commit()
+                    enriched += 1
+                    if exc.response.status_code != 404:
+                        logger.warning("Citation {} zenginlestirilemedi: {}", citation_id, exc)
+                except Exception:
                     failed += 1
-                    return
+                    logger.exception("Citation {} zenginlestirilemedi", citation_id)
 
-                doi = info.get("doi") or ""
-                title = info.get("title") or ""
+        tasks = [_process(cid, oid) for cid, oid in rows]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-                # resolve once: bizim DB'de var mi?
-                article_id = None
-                if doi:
-                    article_id = resolve_citation_targets(conn, cited_doi=doi)
+        # Ilerleme yoksa dur (sonsuz dongu onleme)
+        if enriched == 0 and failed > 0:
+            logger.warning("Citation batch'te ilerleme yok, duruluyor ({} basarisiz)", failed)
+            total_failed += failed
+            break
 
-                conn.execute(
-                    "UPDATE citations SET cited_doi = ?, cited_title = ?, cited_article_id = ? WHERE id = ?",
-                    (doi or None, title or None, article_id, citation_id),
-                )
-                conn.commit()
-                enriched += 1
-                if article_id:
-                    linked += 1
-                await asyncio.sleep(0.15)
-            except httpx.HTTPStatusError as exc:
-                failed += 1
-                if exc.response.status_code == 404:
-                    logger.debug("Citation {} OpenAlex'de bulunamadi", citation_id)
-                else:
-                    logger.warning("Citation {} zenginlestirilemedi: {}", citation_id, exc)
-            except Exception:
-                failed += 1
-                logger.exception("Citation {} zenginlestirilemedi", citation_id)
+        total_enriched += enriched
+        total_linked += linked
+        total_failed += failed
 
-    tasks = [_process(cid, oid) for cid, oid in rows]
-    await asyncio.gather(*tasks, return_exceptions=True)
+        if on_batch_done:
+            on_batch_done(total_enriched, total_linked, total_failed)
 
     logger.info(
         "Citation zenginlestirme tamamlandi: enriched={}, linked={}, failed={}",
-        enriched,
-        linked,
-        failed,
+        total_enriched,
+        total_linked,
+        total_failed,
     )
-    return {"enriched": enriched, "linked_to_our_db": linked, "failed": failed}
+    return {"enriched": total_enriched, "linked_to_our_db": total_linked, "failed": total_failed}

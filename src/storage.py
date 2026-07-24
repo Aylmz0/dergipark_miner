@@ -79,6 +79,12 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     if "enriched_at" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN enriched_at TEXT")
 
+    # Performans icin indexler
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_citations_citing ON citations(citing_article_id)")
+
     conn.commit()
     return conn
 

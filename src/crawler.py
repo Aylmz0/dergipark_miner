@@ -56,24 +56,62 @@ def _extract_journals(html: str) -> list[dict]:
     return [{"short_name": s, "name": n} for s, n in sorted(journals.items())]
 
 
+def _extract_max_page(html: str) -> int:
+    """HTML pagination kontrolunden max sayfa sayisini cikarir.
+
+    DergiPark sayfasinda <ul class="pagination"> icinde ?page=N linkleri bulunur.
+    Bulunamazsa 1 dondurur.
+    """
+    tree = HTMLParser(html)
+    max_page = 1
+    for link in tree.css("ul.pagination a"):
+        href = link.attributes.get("href") or ""
+        if "page=" in href:
+            try:
+                part = href.split("page=")[-1].split("&")[0]
+                page_num = int(part)
+                if page_num > max_page:
+                    max_page = page_num
+            except ValueError, IndexError:
+                continue
+    return max_page
+
+
 def _extract_slugs(html: str) -> set[str]:
     """HTML icindeki dergi linklerinden (/tr/pub/{slug}) slug listesini cikarir."""
     return {j["short_name"] for j in _extract_journals(html)}
 
 
 @retry(max_attempts=3, backoff=1.0)
-async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 5) -> list[dict]:
+async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 0) -> list[dict]:
     """DergiPark dergi kesif sayfasini asenkron gezip dergi bilgilerini toplar.
 
     Fonksiyon disaridan bir httpx.AsyncClient alir; kendi client'ini uretmez.
-    Sayfalar arasinda kisa bekleme yapar ve max_pages ile sinirlidir.
+    max_pages=0 ise HTML pagination'dan otomatik algılanır.
+    Sayfalar arasinda kisa bekleme yapar.
     Donus: [{short_name: "ihad", name: "Islam Hukuku..."}, ...]
     """
     setup_logger()
 
+    # Ilk sayfayi cek, max sayfayi algila
+    logger.info("Dergi listesi cekiliyor: {}", DERGIPARK_JOURNALS_URL)
+    resp = await client.get(
+        DERGIPARK_JOURNALS_URL, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
+    )
+    resp.raise_for_status()
+    first_page_journals = _extract_journals(resp.text)
+
+    if max_pages == 0:
+        max_pages = _extract_max_page(resp.text)
+        logger.info("Otomalgilanan toplam sayfa: {}", max_pages)
+
     collected: dict[str, str] = {}
-    for page in range(1, max_pages + 1):
-        url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
+    for j in first_page_journals:
+        collected[j["short_name"]] = j["name"]
+    logger.info("Sayfa 1: {} dergi bulundu", len(first_page_journals))
+
+    for page in range(2, max_pages + 1):
+        url = f"{DERGIPARK_JOURNALS_URL}?page={page}"
         logger.info("Dergi listesi cekiliyor: {}", url)
         resp = await client.get(
             url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
@@ -113,10 +151,14 @@ async def harvest_all_journals(
     max_records_per_journal: int = 20,
     inter_request_delay: float = 1.5,
     adaptive_delay=None,
-) -> dict[str, list[str]]:
+    on_journal_done=None,
+) -> dict[str, list[str]] | None:
     """Dergi listesindeki her dergi icin OAI ListRecords ham XML'lerini asenkron toplar.
 
-    Donus: {short_name: [raw_oai_xml_string, ...]}  (ham XML; parse EDILMEZ).
+    on_journal_done callable verilirse: streaming mod — her dergi bitince
+    on_journal_done(shortname, xml_pages) cagrilir, XML'ler RAM'de tutulmaz.
+    Verilmezse: eski mod — {shortname: [xml_pages]} dondurur.
+
     - asyncio.Semaphore ile eszamanlilik sinirlanir.
     - Dergi istegi utils.retry ile sarilir; kalici hatada o dergi [] ile atlanir (crash yok).
     - inter_request_delay: istekler arasi bekleme (saniye); +/- %30 rastgelelik.
@@ -127,7 +169,7 @@ async def harvest_all_journals(
     semaphore = asyncio.Semaphore(concurrency)
     total = len(shortnames)
     completed = 0
-    results: dict[str, list[str]] = {}
+    results: dict[str, list[str]] = {} if on_journal_done is None else None
 
     async def _harvest_one(shortname: str, index: int) -> None:
         nonlocal completed
@@ -158,7 +200,10 @@ async def harvest_all_journals(
                     adaptive_delay.on_429(shortname)
                 logger.error("Dergi '{}' harvest edilemedi: {}", shortname, exc)
             finally:
-                results[shortname] = xml_pages
+                if on_journal_done is not None:
+                    on_journal_done(shortname, xml_pages)
+                else:
+                    results[shortname] = xml_pages
                 completed += 1
                 logger.info("{}/{} dergi bitti: {}", completed, total, shortname)
 

@@ -345,7 +345,7 @@ def test_enrich_article_citations_404_does_not_raise(tmp_path):
 
 
 def test_enrich_existing_citations_404_does_not_raise(tmp_path):
-    """404 hatalari enrichment sirasinda exception firlatmaz."""
+    """404 hatalari enrichment sirasinda exception firlatmaz, isaretlenir."""
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, oai_id="oai:test:enrich_cite404")
     cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="WMISSING")
@@ -355,8 +355,9 @@ def test_enrich_existing_citations_404_does_not_raise(tmp_path):
     client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
     result = asyncio.run(enrich_existing_citations(client, conn))
 
-    assert result["failed"] == 1
-    assert result["enriched"] == 0
+    # 404 = bulunamadi, isaretlendi (enriched sayilir, sonsuz dongu olmesin)
+    assert result["enriched"] == 1
+    assert result["failed"] == 0
     conn.close()
 
 
