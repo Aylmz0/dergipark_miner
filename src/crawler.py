@@ -4,6 +4,7 @@ import asyncio
 import json
 import random
 import re
+from datetime import UTC
 from pathlib import Path
 
 import httpx
@@ -46,7 +47,7 @@ def _extract_journals(html: str) -> list[dict]:
             href = anchor.attributes.get("href") or ""
             if not href.startswith("/tr/pub/"):
                 continue
-            slug = href[len("/tr/pub/"):].strip("/")
+            slug = href[len("/tr/pub/") :].strip("/")
             if not slug or "/" in slug or slug.startswith("page"):
                 continue
             name = (anchor.text() or "").strip()
@@ -74,7 +75,9 @@ async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 5) -> li
     for page in range(1, max_pages + 1):
         url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
         logger.info("Dergi listesi cekiliyor: {}", url)
-        resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
+        resp = await client.get(
+            url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
+        )
         resp.raise_for_status()
         page_journals = _extract_journals(resp.text)
         logger.info("Sayfa {}: {} dergi bulundu", page, len(page_journals))
@@ -109,6 +112,7 @@ async def harvest_all_journals(
     concurrency: int = 1,
     max_records_per_journal: int = 20,
     inter_request_delay: float = 1.5,
+    adaptive_delay=None,
 ) -> dict[str, list[str]]:
     """Dergi listesindeki her dergi icin OAI ListRecords ham XML'lerini asenkron toplar.
 
@@ -116,6 +120,7 @@ async def harvest_all_journals(
     - asyncio.Semaphore ile eszamanlilik sinirlanir.
     - Dergi istegi utils.retry ile sarilir; kalici hatada o dergi [] ile atlanir (crash yok).
     - inter_request_delay: istekler arasi bekleme (saniye); +/- %30 rastgelelik.
+    - adaptive_delay: AdaptiveDelay nesnesi; 429'da gecikme artar, basarida azalir.
     - client disaridan alinir; fonksiyon icinde client uretmez.
     """
     setup_logger()
@@ -128,7 +133,8 @@ async def harvest_all_journals(
         nonlocal completed
         xml_pages: list[str] = []
         async with semaphore:
-            await asyncio.sleep(random.uniform(inter_request_delay * 0.7, inter_request_delay * 1.3))
+            delay = adaptive_delay.get(shortname) if adaptive_delay else inter_request_delay
+            await asyncio.sleep(random.uniform(delay * 0.7, delay * 1.3))
             url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&metadataPrefix={OAI_METADATA_PREFIX}"
             collected_records = 0
             try:
@@ -136,6 +142,8 @@ async def harvest_all_journals(
                     body = await _fetch_oai(client, url)
                     xml_pages.append(body)
                     collected_records += body.count("<record>")
+                    if adaptive_delay:
+                        adaptive_delay.on_success(shortname)
                     if "<resumptionToken" not in body:
                         break
                     token_node = HTMLParser(body).css_first("resumptionToken")
@@ -146,6 +154,8 @@ async def harvest_all_journals(
                         f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={token}"
                     )
             except Exception as exc:  # retry sonrasi kalici hata
+                if adaptive_delay and "429" in str(exc):
+                    adaptive_delay.on_429(shortname)
                 logger.error("Dergi '{}' harvest edilemedi: {}", shortname, exc)
             finally:
                 results[shortname] = xml_pages
@@ -272,7 +282,9 @@ async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> 
     Bulamazsa None dondurur.
     """
     logger.debug("PDF linki cekiliyor: {}", article_url)
-    resp = await client.get(article_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
+    resp = await client.get(
+        article_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
+    )
     resp.raise_for_status()
 
     tree = HTMLParser(resp.text)
@@ -310,6 +322,7 @@ def _resolve_pdf_url(base_url: str, href: str) -> str:
         return href
     if href.startswith("/"):
         from urllib.parse import urlparse
+
         parsed = urlparse(base_url)
         return f"{parsed.scheme}://{parsed.netloc}{href}"
     return base_url.rstrip("/") + "/" + href
@@ -338,7 +351,9 @@ async def download_pdf(
 
     logger.debug("PDF indiriliyor: {} -> {}", pdf_url, dest_path)
     try:
-        async with client.stream("GET", pdf_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True) as resp:
+        async with client.stream(
+            "GET", pdf_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
+        ) as resp:
             resp.raise_for_status()
             with open(dest_path, "wb") as f:
                 async for chunk in resp.aiter_bytes(chunk_size=8192):
@@ -370,10 +385,42 @@ def save_pdf_errors(errors: list[dict]) -> None:
 
 
 def log_pdf_error(oai_id: str, article_url: str, error: str) -> None:
-    """Basarisiz PDF indirmesini pdf_errors.json'a kaydeder."""
+    """Basarisiz PDF indirmesini pdf_errors.json'a kaydeder.
+
+    Ayni oai_id icin tekrar cagirilirsa retry_count artirilir.
+    """
+    from datetime import datetime
+
     errors = load_pdf_errors()
-    # Ayni oai_id tekrar eklenmesin
-    if any(e.get("oai_id") == oai_id for e in errors):
-        return
-    errors.append({"oai_id": oai_id, "article_url": article_url, "error": error})
+    existing = next((e for e in errors if e.get("oai_id") == oai_id), None)
+    if existing:
+        existing["retry_count"] = existing.get("retry_count", 1) + 1
+        existing["error"] = error
+        existing["last_attempt"] = datetime.now(UTC).isoformat()
+    else:
+        errors.append(
+            {
+                "oai_id": oai_id,
+                "article_url": article_url,
+                "error": error,
+                "retry_count": 1,
+                "last_attempt": datetime.now(UTC).isoformat(),
+            }
+        )
+    save_pdf_errors(errors)
+
+
+def is_permanently_failed(oai_id: str, max_retries: int = 3) -> bool:
+    """Makale max retry sayisini asip asamadigini kontrol eder."""
+    errors = load_pdf_errors()
+    entry = next((e for e in errors if e.get("oai_id") == oai_id), None)
+    if not entry:
+        return False
+    return entry.get("retry_count", 0) >= max_retries
+
+
+def remove_pdf_error(oai_id: str) -> None:
+    """Basarili indirmesinden sonra makaleyi hata listesinden siler."""
+    errors = load_pdf_errors()
+    errors = [e for e in errors if e.get("oai_id") != oai_id]
     save_pdf_errors(errors)

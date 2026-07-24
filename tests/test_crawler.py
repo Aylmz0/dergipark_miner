@@ -15,9 +15,11 @@ from crawler import (
     fetch_journal_shortnames,
     fetch_journals,
     harvest_all_journals,
+    is_permanently_failed,
     load_pdf_errors,
     log_pdf_error,
     parse_article_metadata,
+    remove_pdf_error,
 )
 
 SAMPLE_HTML = """
@@ -399,4 +401,33 @@ def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
     errors = load_pdf_errors()
     assert len(errors) == 1
+    assert errors[0]["retry_count"] == 2  # 2 kez cagirildi
+
+
+def test_is_permanently_failed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    assert is_permanently_failed("oai:test:1", max_retries=3) is False
+
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "err")
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "err")
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "err")
+    assert is_permanently_failed("oai:test:1", max_retries=3) is True
+
+
+def test_remove_pdf_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    log_pdf_error("oai:test:1", "https://example.com/1.pdf", "err1")
+    log_pdf_error("oai:test:2", "https://example.com/2.pdf", "err2")
+    assert len(load_pdf_errors()) == 2
+
+    remove_pdf_error("oai:test:1")
+    errors = load_pdf_errors()
+    assert len(errors) == 1
+    assert errors[0]["oai_id"] == "oai:test:2"
 

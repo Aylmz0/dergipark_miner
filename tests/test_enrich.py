@@ -5,6 +5,7 @@ import asyncio
 import httpx
 
 from src.enrich import (
+    enrich_all_articles,
     enrich_article_citations,
     enrich_existing_citations,
     fetch_openalex_work,
@@ -13,11 +14,11 @@ from src.enrich import (
 from src.storage import init_db, insert_article, insert_citation
 
 
-def _make_article(conn, title="Test Article", oai_id="oai:test:1"):
+def _make_article(conn, title="Test Article", oai_id="oai:test:1", doi=None):
     """Test icut article olusturur ve id dondurur."""
     article = {
         "title": title,
-        "doi": "",
+        "doi": doi or "",
         "authors": [],
         "publication_date": "2024-01-01",
         "journal_shortname": "testjournal",
@@ -356,4 +357,40 @@ def test_enrich_existing_citations_404_does_not_raise(tmp_path):
 
     assert result["failed"] == 1
     assert result["enriched"] == 0
+    conn.close()
+
+
+def test_enrich_all_articles_skips_already_enriched(tmp_path):
+    """enriched_at dolu makaleler atlanir."""
+    conn = init_db(str(tmp_path / "test.db"))
+    _make_article(conn, oai_id="oai:test:enriched1", doi="10.1111/done")
+    _make_article(conn, oai_id="oai:test:notdone1", doi="10.2222/todo")
+
+    # Ilkini isaretledik
+    conn.execute(
+        "UPDATE articles SET enriched_at = datetime('now') WHERE oai_identifier = ?",
+        ("oai:test:enriched1",),
+    )
+    conn.commit()
+
+    call_count = 0
+
+    def handler(request):
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(200, json={
+            "results": [{
+                "id": "https://openalex.org/W123",
+                "doi": "https://doi.org/10.2222/todo",
+                "title": "Test",
+                "referenced_works": [],
+            }],
+        })
+
+    client = _make_client(handler)
+    result = asyncio.run(enrich_all_articles(client, conn, concurrency=1, batch_size=50))
+
+    # Sadece 1 makale islendi (enriched_at'i olmayan)
+    assert result["enriched"] == 1
+    assert call_count == 1
     conn.close()

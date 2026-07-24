@@ -15,7 +15,9 @@ OPENALEX_MAIL = "dergipark-miner@example.com"
 
 
 @retry(max_attempts=3, backoff=1.0)
-async def fetch_openalex_work(client: httpx.AsyncClient, *, doi: str = "", title: str = "") -> dict | None:
+async def fetch_openalex_work(
+    client: httpx.AsyncClient, *, doi: str = "", title: str = ""
+) -> dict | None:
     """OpenAlex'den bir work JSON'u ceker.
 
     Once DOI ile arar (dogrudan /works/https://doi.org/{doi}),
@@ -124,7 +126,7 @@ async def enrich_all_articles(
     sem = asyncio.Semaphore(concurrency)
 
     rows = conn.execute(
-        "SELECT id, doi, title FROM articles LIMIT ?", (batch_size,)
+        "SELECT id, doi, title FROM articles WHERE enriched_at IS NULL LIMIT ?", (batch_size,)
     ).fetchall()
     if not rows:
         logger.info("Zenginlestirilecek makale yok")
@@ -143,6 +145,11 @@ async def enrich_all_articles(
                 count = await enrich_article_citations(
                     client, article_id, {"doi": doi, "title": title}, conn
                 )
+                conn.execute(
+                    "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
+                    (article_id,),
+                )
+                conn.commit()
                 enriched += 1
                 citations_added += count
                 logger.debug("Makale {} -> {} referans", article_id, count)
@@ -162,7 +169,9 @@ async def enrich_all_articles(
 
     logger.info(
         "Zenginlestirme tamamlandi: enriched={}, citations={}, failed={}",
-        enriched, citations_added, failed,
+        enriched,
+        citations_added,
+        failed,
     )
     return {"enriched": enriched, "citations_added": citations_added, "failed": failed}
 
@@ -199,7 +208,9 @@ async def enrich_existing_citations(
         logger.info("Zenginlestirilecek citation yok")
         return {"enriched": 0, "linked_to_our_db": 0, "failed": 0}
 
-    logger.info("Citation zenginlestirme basliyor: {} satir (concurrency={})", len(rows), concurrency)
+    logger.info(
+        "Citation zenginlestirme basliyor: {} satir (concurrency={})", len(rows), concurrency
+    )
 
     enriched = 0
     linked = 0
@@ -246,6 +257,8 @@ async def enrich_existing_citations(
 
     logger.info(
         "Citation zenginlestirme tamamlandi: enriched={}, linked={}, failed={}",
-        enriched, linked, failed,
+        enriched,
+        linked,
+        failed,
     )
     return {"enriched": enriched, "linked_to_our_db": linked, "failed": failed}

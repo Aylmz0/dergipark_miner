@@ -191,3 +191,52 @@ def test_checkpoint_load_corrupt_file(tmp_path):
     path.write_text("{invalid json!!!", encoding="utf-8")
     result = utils.load_checkpoint(path)
     assert result == {}
+
+
+def test_adaptive_delay_default():
+    """Varsayilan deger default ile baslar."""
+    d = utils.AdaptiveDelay(default=2.0)
+    assert d.get("j1") == 2.0
+
+
+def test_adaptive_delay_on_429_increases():
+    """429'da gecikme artar."""
+    d = utils.AdaptiveDelay(default=2.0, backoff_factor=2.0)
+    new_delay = d.on_429("j1")
+    assert new_delay == 4.0
+    assert d.get("j1") == 4.0
+
+
+def test_adaptive_delay_on_success_decays():
+    """Basarida gecikme azalir."""
+    d = utils.AdaptiveDelay(default=2.0, decay_factor=0.5)
+    d.on_429("j1")  # 2.0 -> 4.0
+    new_delay = d.on_success("j1")  # 4.0 -> 2.0
+    assert new_delay == 2.0
+
+
+def test_adaptive_delay_respects_min_max():
+    """Min/max sinirlarini asmaz."""
+    d = utils.AdaptiveDelay(default=2.0, min_delay=0.5, max_delay=10.0, backoff_factor=3.0)
+    d.on_429("j1")  # 2.0 -> 6.0
+    d.on_429("j1")  # 6.0 -> 10.0 (max)
+    d.on_429("j1")  # 10.0 -> 10.0 (capped)
+    assert d.get("j1") == 10.0
+
+    d2 = utils.AdaptiveDelay(default=2.0, min_delay=0.5, decay_factor=0.1)
+    d2.on_success("j1")  # 2.0 -> 0.5 (min)
+    d2.on_success("j1")  # 0.5 -> 0.5 (capped)
+    assert d2.get("j1") == 0.5
+
+
+def test_adaptive_delay_to_dict_from_dict():
+    """to_dict/from_dict serilestirme."""
+    d = utils.AdaptiveDelay(default=2.0)
+    d.on_429("j1")
+    d.on_429("j2")
+    data = d.to_dict()
+    assert data == {"j1": 4.0, "j2": 4.0}
+
+    d2 = utils.AdaptiveDelay.from_dict(data, default=2.0)
+    assert d2.get("j1") == 4.0
+    assert d2.get("j2") == 4.0

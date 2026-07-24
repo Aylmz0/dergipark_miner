@@ -96,9 +96,7 @@ def export_all_journals(
     Returns:
         Oluşturulan dosya yolları listesi.
     """
-    journals = conn.execute(
-        "SELECT short_name FROM journals ORDER BY short_name"
-    ).fetchall()
+    journals = conn.execute("SELECT short_name FROM journals ORDER BY short_name").fetchall()
 
     files = []
     for (short_name,) in journals:

@@ -38,6 +38,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             doi            TEXT,
             publication_date TEXT,
             oai_identifier TEXT,
+            enriched_at    TEXT,
             created_at     TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (journal_id) REFERENCES journals(id)
         );
@@ -73,6 +74,10 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     cit_cols = {row[1] for row in conn.execute("PRAGMA table_info(citations)").fetchall()}
     if "cited_openalex_id" not in cit_cols:
         conn.execute("ALTER TABLE citations ADD COLUMN cited_openalex_id TEXT")
+
+    # enriched_at kolonu eksik olabilir; ekle
+    if "enriched_at" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN enriched_at TEXT")
 
     conn.commit()
     return conn
@@ -121,7 +126,9 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     - Yazarlari authors tablosuna yazar (UPSERT'te eskilerini siler).
     - Dönen değer articles.id (rowid).
     """
-    journal_id = _resolve_journal(conn, article.get("journal_shortname") or "", article.get("journal_name") or "")
+    journal_id = _resolve_journal(
+        conn, article.get("journal_shortname") or "", article.get("journal_name") or ""
+    )
     title = article.get("title") or ""
     doi = article.get("doi") or ""
     publication_date = article.get("publication_date") or ""
@@ -148,9 +155,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
 
     # 2. DOI ile bul
     if article_id is None and doi:
-        existing = conn.execute(
-            "SELECT id FROM articles WHERE doi = ?", (doi,)
-        ).fetchone()
+        existing = conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone()
         if existing:
             article_id = existing[0]
             conn.execute(
@@ -244,10 +249,10 @@ def resolve_citation_targets(conn: sqlite3.Connection, *, cited_doi: str = "") -
         return None
     # Normalize: https://doi.org/10.xxx -> 10.xxx
     if doi.startswith("https://doi.org/"):
-        doi = doi[len("https://doi.org/"):]
+        doi = doi[len("https://doi.org/") :]
     elif doi.startswith("http://doi.org/"):
-        doi = doi[len("http://doi.org/"):]
+        doi = doi[len("http://doi.org/") :]
     elif doi.startswith("doi.org/"):
-        doi = doi[len("doi.org/"):]
+        doi = doi[len("doi.org/") :]
     row = conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone()
     return row[0] if row else None

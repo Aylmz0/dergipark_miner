@@ -70,7 +70,10 @@ def retry(
                     wait = _wait_time(exc, attempt)
                     logger.warning(
                         "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
-                        attempt, max_attempts, exc, wait,
+                        attempt,
+                        max_attempts,
+                        exc,
+                        wait,
                     )
                     if attempt < max_attempts:
                         time.sleep(wait)
@@ -90,7 +93,10 @@ def retry(
                     wait = _wait_time(exc, attempt)
                     logger.warning(
                         "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
-                        attempt, max_attempts, exc, wait,
+                        attempt,
+                        max_attempts,
+                        exc,
+                        wait,
                     )
                     if attempt < max_attempts:
                         await asyncio.sleep(wait)
@@ -146,6 +152,7 @@ def save_checkpoint(path: str | Path = "checkpoint.json", *, state: dict) -> Non
     path = Path(path)
     tmp = path.with_suffix(".tmp")
     import json
+
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.rename(path)
 
@@ -157,7 +164,55 @@ def load_checkpoint(path: str | Path = "checkpoint.json") -> dict:
         return {}
     try:
         import json
+
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         logger.warning("Checkpoint dosyasi bozuk: {}", path)
         return {}
+
+
+class AdaptiveDelay:
+    """Per-journal adaptive delay tracker.
+
+    On 429: increase delay (multiply by backoff_factor).
+    On success: decrease delay (multiply by decay_factor), clamped to min_delay.
+    """
+
+    def __init__(
+        self,
+        default: float = 2.0,
+        min_delay: float = 0.5,
+        max_delay: float = 30.0,
+        backoff_factor: float = 2.0,
+        decay_factor: float = 0.9,
+    ):
+        self._delays: dict[str, float] = {}
+        self._default = default
+        self._min = min_delay
+        self._max = max_delay
+        self._backoff = backoff_factor
+        self._decay = decay_factor
+
+    def get(self, journal: str) -> float:
+        return self._delays.get(journal, self._default)
+
+    def on_429(self, journal: str) -> float:
+        current = self.get(journal)
+        new_delay = min(current * self._backoff, self._max)
+        self._delays[journal] = new_delay
+        return new_delay
+
+    def on_success(self, journal: str) -> float:
+        current = self.get(journal)
+        new_delay = max(current * self._decay, self._min)
+        self._delays[journal] = new_delay
+        return new_delay
+
+    def to_dict(self) -> dict[str, float]:
+        return dict(self._delays)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, float], **kwargs) -> AdaptiveDelay:
+        obj = cls(**kwargs)
+        obj._delays = dict(data)
+        return obj
