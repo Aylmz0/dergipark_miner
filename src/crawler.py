@@ -56,80 +56,59 @@ def _extract_journals(html: str) -> list[dict]:
     return [{"short_name": s, "name": n} for s, n in sorted(journals.items())]
 
 
-def _extract_max_page(html: str) -> int:
-    """HTML pagination kontrolunden max sayfa sayisini cikarir.
-
-    DergiPark sayfasinda <ul class="pagination"> icinde ?page=N linkleri bulunur.
-    Bulunamazsa 1 dondurur.
-    """
-    tree = HTMLParser(html)
-    max_page = 1
-    for link in tree.css("ul.pagination a"):
-        href = link.attributes.get("href") or ""
-        if "page=" in href:
-            try:
-                part = href.split("page=")[-1].split("&")[0]
-                page_num = int(part)
-                if page_num > max_page:
-                    max_page = page_num
-            except ValueError, IndexError:
-                continue
-    return max_page
-
-
 def _extract_slugs(html: str) -> set[str]:
     """HTML icindeki dergi linklerinden (/tr/pub/{slug}) slug listesini cikarir."""
     return {j["short_name"] for j in _extract_journals(html)}
 
 
 @retry(max_attempts=3, backoff=1.0)
-async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 0) -> list[dict]:
+async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) -> list[dict]:
     """DergiPark dergi kesif sayfasini asenkron gezip dergi bilgilerini toplar.
 
-    Fonksiyon disaridan bir httpx.AsyncClient alir; kendi client'ini uretmez.
-    max_pages=0 ise HTML pagination'dan otomatik algılanır.
-    Sayfalar arasinda kisa bekleme yapar.
+    While dongusu ile sayfalar bitene kadar devam eder:
+    - Sayfa 0 dergi dondururse durur
+    - Tum dergiler zaten toplanmissa (out-of-bounds redirect) durur
+    - max_pages hard limit olarak korunur
     Donus: [{short_name: "ihad", name: "Islam Hukuku..."}, ...]
     """
     setup_logger()
 
-    # Ilk sayfayi cek, max sayfayi algila
-    logger.info("Dergi listesi cekiliyor: {}", DERGIPARK_JOURNALS_URL)
-    resp = await client.get(
-        DERGIPARK_JOURNALS_URL, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
-    )
-    resp.raise_for_status()
-    first_page_journals = _extract_journals(resp.text)
-
-    if max_pages == 0:
-        max_pages = _extract_max_page(resp.text)
-        logger.info("Otomalgilanan toplam sayfa: {}", max_pages)
-
     collected: dict[str, str] = {}
-    for j in first_page_journals:
-        collected[j["short_name"]] = j["name"]
-    logger.info("Sayfa 1: {} dergi bulundu", len(first_page_journals))
+    page = 1
 
-    for page in range(2, max_pages + 1):
-        url = f"{DERGIPARK_JOURNALS_URL}?page={page}"
+    while page <= max_pages:
+        url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
         logger.info("Dergi listesi cekiliyor: {}", url)
         resp = await client.get(
             url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
         )
         resp.raise_for_status()
         page_journals = _extract_journals(resp.text)
-        logger.info("Sayfa {}: {} dergi bulundu", page, len(page_journals))
+
+        if not page_journals:
+            logger.info("Sayfa 0 dergi dondurdu, bitiriliyor: sayfa {}", page)
+            break
+
+        before = len(collected)
         for j in page_journals:
-            if j["short_name"] not in collected:
-                collected[j["short_name"]] = j["name"]
-        if page < max_pages:
-            await asyncio.sleep(random.uniform(1.0, 2.0))
+            collected[j["short_name"]] = j["name"]
+        logger.info(
+            "Sayfa {}: {} dergi bulundu (toplam: {})", page, len(page_journals), len(collected)
+        )
+
+        # Tum dergiler zaten toplanmissa (out-of-bounds redirect korumasi)
+        if len(collected) == before and page > 1:
+            logger.info("Yeni dergi eklenmedi, bitiriliyor: sayfa {}", page)
+            break
+
+        page += 1
+        await asyncio.sleep(random.uniform(1.0, 2.0))
 
     return [{"short_name": s, "name": n} for s, n in sorted(collected.items())]
 
 
 # backward compat alias
-async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int = 5) -> list[str]:
+async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int = 1000) -> list[str]:
     """fetch_journals'un eski arayuzu — sadece short_name listesi dondurur."""
     journals = await fetch_journals(client, max_pages=max_pages)
     return [j["short_name"] for j in journals]
