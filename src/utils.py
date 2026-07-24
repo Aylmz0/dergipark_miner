@@ -6,6 +6,7 @@ Faz 2-5 boyunca kullanılacak yardımcılar.
 import asyncio
 import functools
 import inspect
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -64,7 +65,6 @@ def retry(
                     return func(*args, **kwargs)
                 except exceptions as exc:
                     if not _should_retry(exc):
-                        logger.debug("Deneme {}/{}: hemen firlatiliyor (retry edilmeyecek): {}", attempt, max_attempts, exc)
                         raise
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
@@ -85,7 +85,6 @@ def retry(
                     return await func(*args, **kwargs)
                 except exceptions as exc:
                     if not _should_retry(exc):
-                        logger.debug("Deneme {}/{}: hemen firlatiliyor (retry edilmeyecek): {}", attempt, max_attempts, exc)
                         raise
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
@@ -109,8 +108,9 @@ _logger_ready = False
 
 
 def setup_logger() -> None:
-    """loguru'yu yapılandırır: hatalar data/error.log'a (rotation), konsola bilgi seviyesinde.
+    """loguru'yu yapılandırır: konsola INFO, hatalar data/error.log'a.
 
+    LOGURU_LEVEL ortam değişkeni ile konsol seviyesi değiştirilebilir.
     Birden fazla çağrıda tekrar handler eklenmez (guard).
     """
     global _logger_ready
@@ -120,12 +120,23 @@ def setup_logger() -> None:
     data_dir = Path("data")
     data_dir.mkdir(exist_ok=True)
 
+    log_level = os.environ.get("LOGURU_LEVEL", "INFO").upper()
+
+    # Varsayılan handler'ları kaldır, konsol handler'ı INFO ile yeniden ekle
+    logger.remove()
+    logger.add(
+        lambda msg: print(msg, end=""),
+        level=log_level,
+        format="{time:HH:mm:ss} | {level: <8} | {message}",
+    )
+
+    # Dosya handler'ı: sadece ERROR+, rotate 10MB
     logger.add(
         data_dir / "error.log",
         level="ERROR",
         rotation="10 MB",
         backtrace=True,
-        diagnose=True,
+        diagnose=False,
     )
     _logger_ready = True
 

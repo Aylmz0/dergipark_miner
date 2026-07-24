@@ -2,8 +2,13 @@
 
 DergiOAI cek -> parse et -> SQLite'a yaz -> OpenAlex ile zenginlestir.
 Checkpoint ile kaldigi yerden devam eder.
+
+Kullanim:
+    python main.py                  # tum pipeline
+    python main.py --skip-enrich    # OpenAlex zenginlestirmesini atla
 """
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -30,7 +35,7 @@ from src.utils import load_checkpoint, save_checkpoint, setup_logger  # noqa: E4
 CHECKPOINT_PATH = Path("checkpoint.json")
 
 
-async def run():
+async def run(skip_enrich: bool = False):
     setup_logger()
     logger.info("=== dergipark-miner baslatildi ===")
 
@@ -151,28 +156,31 @@ async def run():
             logger.exception("PDF indirme hatasi")
 
         # 5. OpenAlex zenginlestirme
-        try:
-            result = await enrich_all_articles(client, conn, concurrency=3, batch_size=50)
-            logger.info(
-                "Zenginlestirme: enriched={}, citations={}, failed={}",
-                result["enriched"],
-                result["citations_added"],
-                result["failed"],
-            )
-        except Exception:
-            logger.exception("Zenginlestirme hatasi")
+        if skip_enrich:
+            logger.info("OpenAlex zenginlestirme atlandi (--skip-enrich)")
+        else:
+            try:
+                result = await enrich_all_articles(client, conn, concurrency=3, batch_size=50)
+                logger.info(
+                    "Zenginlestirme: enriched={}, citations={}, failed={}",
+                    result["enriched"],
+                    result["citations_added"],
+                    result["failed"],
+                )
+            except Exception:
+                logger.exception("Zenginlestirme hatasi")
 
-        # 6. Citation DOI/baglanti zenginlestirme
-        try:
-            result2 = await enrich_existing_citations(client, conn, concurrency=3, batch_size=100)
-            logger.info(
-                "Citation zenginlestirme: enriched={}, linked={}, failed={}",
-                result2["enriched"],
-                result2["linked_to_our_db"],
-                result2["failed"],
-            )
-        except Exception:
-            logger.exception("Citation zenginlestirme hatasi")
+            # 6. Citation DOI/baglanti zenginlestirme
+            try:
+                result2 = await enrich_existing_citations(client, conn, concurrency=3, batch_size=100)
+                logger.info(
+                    "Citation zenginlestirme: enriched={}, linked={}, failed={}",
+                    result2["enriched"],
+                    result2["linked_to_our_db"],
+                    result2["failed"],
+                )
+            except Exception:
+                logger.exception("Citation zenginlestirme hatasi")
 
     # Son checkpoint
     try:
@@ -190,4 +198,8 @@ async def run():
 if __name__ == "__main__":
     import asyncio
 
-    asyncio.run(run())
+    parser = argparse.ArgumentParser(description="dergipark-miner: academic data mining tool")
+    parser.add_argument("--skip-enrich", action="store_true", help="OpenAlex zenginlestirmesini atla")
+    args = parser.parse_args()
+
+    asyncio.run(run(skip_enrich=args.skip_enrich))

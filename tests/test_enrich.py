@@ -330,3 +330,30 @@ def test_enrich_existing_citations_skips_already_enriched(tmp_path):
 
     assert result["enriched"] == 0
     conn.close()
+
+
+def test_enrich_article_citations_404_does_not_raise(tmp_path):
+    """404 hatalari exception yerine debug log olarak islenir."""
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich404")
+    client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
+
+    count = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/missing", "title": ""}, conn))
+    assert count == 0
+    conn.close()
+
+
+def test_enrich_existing_citations_404_does_not_raise(tmp_path):
+    """404 hatalari enrichment sirasinda exception firlatmaz."""
+    conn = init_db(str(tmp_path / "test.db"))
+    aid = _make_article(conn, oai_id="oai:test:enrich_cite404")
+    cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="WMISSING")
+    conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
+    conn.commit()
+
+    client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
+    result = asyncio.run(enrich_existing_citations(client, conn))
+
+    assert result["failed"] == 1
+    assert result["enriched"] == 0
+    conn.close()

@@ -83,7 +83,13 @@ async def enrich_article_citations(
     if not doi and not title:
         return 0
 
-    work = await fetch_openalex_work(client, doi=doi, title=title)
+    try:
+        work = await fetch_openalex_work(client, doi=doi, title=title)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            logger.debug("Makale {} OpenAlex'de bulunamadi", article_id)
+            return 0
+        raise
     if not work:
         return 0
 
@@ -141,6 +147,12 @@ async def enrich_all_articles(
                 citations_added += count
                 logger.debug("Makale {} -> {} referans", article_id, count)
                 await asyncio.sleep(0.15)  # rate-limit
+            except httpx.HTTPStatusError as exc:
+                failed += 1
+                if exc.response.status_code == 404:
+                    logger.debug("Makale {} OpenAlex'de bulunamadi", article_id)
+                else:
+                    logger.warning("Makale {} zenginlestirilemedi: {}", article_id, exc)
             except Exception:
                 failed += 1
                 logger.exception("Makale {} zenginlestirilemedi", article_id)
@@ -219,6 +231,12 @@ async def enrich_existing_citations(
                 if article_id:
                     linked += 1
                 await asyncio.sleep(0.15)
+            except httpx.HTTPStatusError as exc:
+                failed += 1
+                if exc.response.status_code == 404:
+                    logger.debug("Citation {} OpenAlex'de bulunamadi", citation_id)
+                else:
+                    logger.warning("Citation {} zenginlestirilemedi: {}", citation_id, exc)
             except Exception:
                 failed += 1
                 logger.exception("Citation {} zenginlestirilemedi", citation_id)
