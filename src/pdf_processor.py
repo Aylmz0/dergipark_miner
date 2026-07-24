@@ -18,5 +18,5 @@ def convert_pdf(pdf_path: str, *, hybrid: str = "docling-fast") -> None:
         result = opendataloader_pdf.convert(input_path=pdf_path, hybrid=hybrid)
         return result
     except Exception as exc:
-        logger.error("PDF işlenemedi ({}): {}", pdf_path, exc)
+        logger.error("PDF processing failed ({}): {}", pdf_path, exc)
         raise

@@ -213,7 +213,7 @@ def test_insert_article_content_hash_dedup(conn):
     }
     id1 = insert_article(conn, article)
     id2 = insert_article(conn, article)
-    assert id1 == id2  # ayni makale, ayni id
+    assert id1 == id2  # Same article, same id
 
     total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
     assert total == 1

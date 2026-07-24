@@ -7,30 +7,31 @@ import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from selectolax.parser import HTMLParser
 
 from src.utils import AdaptiveDelay, logger, retry, setup_logger
 
-# DergiPark OAI-PMH taban URL'i (canli testle 2026-07 teyit edildi, 200 + <OAI-PMH>).
-# OAI-PMH dergi bazlidir; tekil dergi URL'i f"{DERGIPARK_OAI_BASE}/{dergi_kisa_adi}"
-# seklindedir (orn. "https://dergipark.org.tr/api/public/oai/ihad").
+# DergiPark OAI-PMH base URL (verified live 2026-07, returns 200 + <OAI-PMH>).
+# OAI-PMH is per-journal; single journal URL is "{DERGIPARK_OAI_BASE}/{short_name}"
+# e.g. "https://dergipark.org.tr/api/public/oai/ihad".
 DERGIPARK_OAI_BASE = "https://dergipark.org.tr/api/public/oai"
 
-# DergiPark dergi kesif (index) sayfasi. Sayfalama "?page=N" ile yapilir.
+# DergiPark journal discovery (index) page. Pagination via "?page=N".
 DERGIPARK_JOURNALS_URL = "https://dergipark.org.tr/tr/pub/explore/journals"
 
-# OpenAlex REST API taban URL'i (resmi dokumantasyona gore dogru).
+# OpenAlex REST API base URL (per official documentation).
 OPENALEX_BASE = "https://api.openalex.org"
 
-# OAI-PMH ListRecords icin kullanilan metadata formati.
-# Canli teyit (2026-07, dergi "ihad"): desteklenen prefix'ler oai_dc, oai_etdms,
-# oai_marc, oai_mods; ListRecords ornegi:
-#   {DERGIPARK_OAI_BASE}/{short_name}?verb=ListRecords&metadataPrefix=oai_dc  (200, sayfa basi 100 kayit)
+# OAI-PMH ListRecords metadata format.
+# Live verified (2026-07, journal "ihad"): supported prefixes are oai_dc, oai_etdms,
+# oai_marc, oai_mods; ListRecords example:
+#   {DERGIPARK_OAI_BASE}/{short_name}?verb=ListRecords&metadataPrefix=oai_dc  (200, 100 records/page)
 OAI_METADATA_PREFIX = "oai_dc"
 
-# Tum dis kaynakli HTTP isteklerinde kullanilacak varsayilan User-Agent.
+# Default User-Agent for all external HTTP requests.
 DEFAULT_USER_AGENT = "dergipark-miner/0.1 (https://github.com/example/dergipark_miner)"
 
 
@@ -82,7 +83,7 @@ async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) ->
 
     while page <= max_pages:
         url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
-        logger.info("Dergi listesi cekiliyor: {}", url)
+        logger.info("Fetching journal list: {}", url)
         resp = await client.get(
             url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
         )
@@ -90,19 +91,19 @@ async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) ->
         page_journals = _extract_journals(resp.text)
 
         if not page_journals:
-            logger.info("Sayfa 0 dergi dondurdu, bitiriliyor: sayfa {}", page)
+            logger.info("Page returned 0 journals, stopping: page {}", page)
             break
 
         before = len(collected)
         for j in page_journals:
             collected[j["short_name"]] = j["name"]
         logger.info(
-            "Sayfa {}: {} dergi bulundu (toplam: {})", page, len(page_journals), len(collected)
+            "Page {}: {} journals found (total: {})", page, len(page_journals), len(collected)
         )
 
-        # Tum dergiler zaten toplanmissa (out-of-bounds redirect korumasi)
+        # All journals already collected (out-of-bounds redirect guard)
         if len(collected) == before and page > 1:
-            logger.info("Yeni dergi eklenmedi, bitiriliyor: sayfa {}", page)
+            logger.info("No new journals added, stopping: page {}", page)
             break
 
         page += 1
@@ -178,7 +179,7 @@ async def harvest_all_journals(
                     try:
                         body = await _fetch_oai(client, url)
                     except Exception as fetch_exc:
-                        # badResumptionToken kontrolu
+                        # Check for badResumptionToken error
                         error_msg = str(fetch_exc).lower()
                         is_token_error = (
                             "badresumptiontoken" in error_msg or "resumptiontoken" in error_msg
@@ -186,7 +187,7 @@ async def harvest_all_journals(
                         if is_token_error and token_restarts < max_token_restarts:
                             token_restarts += 1
                             logger.warning(
-                                "Dergi '{}' token hatasi, basa donuluyor (deneme {}/{})",
+                                "Journal '{}' token error, restarting (attempt {}/{})",
                                 shortname,
                                 token_restarts,
                                 max_token_restarts,
@@ -211,17 +212,17 @@ async def harvest_all_journals(
                     url = (
                         f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={token}"
                     )
-            except Exception as exc:  # retry sonrasi kalici hata
+            except Exception as exc:  # Permanent error after retry
                 if adaptive_delay and "429" in str(exc):
                     adaptive_delay.on_429(shortname)
-                logger.error("Dergi '{}' harvest edilemedi: {}", shortname, exc)
+                logger.error("Journal '{}' harvest failed: {}", shortname, exc)
             finally:
                 if on_journal_done is not None:
                     on_journal_done(shortname, xml_pages)
                 else:
                     results[shortname] = xml_pages
                 completed += 1
-                logger.info("{}/{} dergi bitti: {}", completed, total, shortname)
+                logger.info("{}/{} journals done: {}", completed, total, shortname)
 
     await asyncio.gather(*(_harvest_one(name, i) for i, name in enumerate(shortnames, 1)))
     return results
@@ -284,7 +285,7 @@ def parse_article_metadata(xml_text: str) -> dict:
     relations: list[str] = []
     sources: list[str] = []
 
-    # header'daki <identifier> (oai:dergipark.org.tr:article/...)
+    # Extract header <identifier> (oai:dergipark.org.tr:article/...)
     oai_id = ""
     header_node = tree.css_first("header identifier")
     if header_node:
@@ -309,7 +310,7 @@ def parse_article_metadata(xml_text: str) -> dict:
         elif tag == "dc:source":
             sources.append(text)
 
-    # en baslik tercih et; yoksa ilkini al
+    # Prefer English title; fall back to first available
     title = ""
     if titles:
         en_titles = [t for t, lang in titles if lang.startswith("en")]
@@ -325,7 +326,7 @@ def parse_article_metadata(xml_text: str) -> dict:
             doi = ident.split("doi.org/")[-1].strip("/")
             break
 
-    # journal_shortname: once relation'da, sonra source'da /pub/{slug} ara
+    # journal_shortname: check relation first, then source for /pub/{slug}
     journal_shortname = ""
     for pool in (relations, sources):
         for item in pool:
@@ -336,7 +337,7 @@ def parse_article_metadata(xml_text: str) -> dict:
         if journal_shortname:
             break
 
-    # journal_name: dc:source icindeki dergi adi (URL olmayan ilk deger)
+    # journal_name: first non-URL value in dc:source
     journal_name = ""
     for src in sources:
         src = src.strip()
@@ -356,7 +357,7 @@ def parse_article_metadata(xml_text: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# PDF indirme fonksiyonlari
+# PDF download functions
 # ---------------------------------------------------------------------------
 
 PDF_ERRORS_PATH = Path("data/pdf_errors.json")
@@ -379,7 +380,7 @@ async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> 
     Returns:
         Absolute PDF URL if found, None otherwise.
     """
-    logger.debug("PDF linki cekiliyor: {}", article_url)
+    logger.debug("Fetching PDF link: {}", article_url)
     resp = await client.get(
         article_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
     )
@@ -387,31 +388,41 @@ async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> 
 
     tree = HTMLParser(resp.text)
 
-    # 1. /download/article-file/ (DergiPark'in asil PDF pattern'i)
+    # Single pass: collect all hrefs and rank by priority
+    best: str | None = None
+    best_priority = 999
     for anchor in tree.css("a"):
         href = anchor.attributes.get("href") or ""
-        if "/download/article-file/" in href:
-            return _resolve_pdf_url(article_url, href)
+        if not href:
+            continue
+        priority = _pdf_link_priority(href)
+        if priority < best_priority:
+            best = href
+            best_priority = priority
+            if priority == 0:
+                break
 
-    # 2. "download" + ".pdf" iceren link
-    for anchor in tree.css("a"):
-        href = anchor.attributes.get("href") or ""
-        if "download" in href and href.endswith(".pdf"):
-            return _resolve_pdf_url(article_url, href)
+    return _resolve_pdf_url(article_url, best) if best else None
 
-    # 3. .pdf uzantili link
-    for anchor in tree.css("a"):
-        href = anchor.attributes.get("href") or ""
-        if href.endswith(".pdf"):
-            return _resolve_pdf_url(article_url, href)
 
-    # 4. href icinde .pdf gecen herhangi bir link
-    for anchor in tree.css("a"):
-        href = anchor.attributes.get("href") or ""
-        if ".pdf" in href.lower():
-            return _resolve_pdf_url(article_url, href)
+def _pdf_link_priority(href: str) -> int:
+    """Rank a link href for PDF download priority (lower is better).
 
-    return None
+    Args:
+        href: The href attribute from an <a> tag.
+
+    Returns:
+        Priority rank: 0=best (article-file download), 999=not a PDF link.
+    """
+    if "/download/article-file/" in href:
+        return 0
+    if "download" in href and href.endswith(".pdf"):
+        return 1
+    if href.endswith(".pdf"):
+        return 2
+    if ".pdf" in href.lower():
+        return 3
+    return 999
 
 
 def _resolve_pdf_url(base_url: str, href: str) -> str:
@@ -427,8 +438,6 @@ def _resolve_pdf_url(base_url: str, href: str) -> str:
     if href.startswith("http"):
         return href
     if href.startswith("/"):
-        from urllib.parse import urlparse
-
         parsed = urlparse(base_url)
         return f"{parsed.scheme}://{parsed.netloc}{href}"
     return base_url.rstrip("/") + "/" + href
@@ -440,7 +449,7 @@ async def download_pdf(
     pdf_url: str,
     dest_path: Path,
 ) -> bool:
-    """PDF dosyasini stream modunda indirir.
+    """Download a PDF file in streaming mode.
 
     Exceptions propagate to caller for proper transient/permanent classification.
 
@@ -454,7 +463,7 @@ async def download_pdf(
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    logger.debug("PDF indiriliyor: {} -> {}", pdf_url, dest_path)
+    logger.debug("Downloading PDF: {} -> {}", pdf_url, dest_path)
     async with client.stream(
         "GET", pdf_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
     ) as resp:
@@ -464,7 +473,7 @@ async def download_pdf(
                 f.write(chunk)
 
     size_kb = dest_path.stat().st_size / 1024
-    logger.info("PDF indirildi: {} ({:.1f} KB)", dest_path.name, size_kb)
+    logger.info("PDF downloaded: {} ({:.1f} KB)", dest_path.name, size_kb)
     return True
 
 

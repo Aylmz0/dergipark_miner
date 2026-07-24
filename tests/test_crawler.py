@@ -397,7 +397,7 @@ def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
     errors = load_pdf_errors()
     assert len(errors) == 1
-    assert errors[0]["retry_count"] == 2  # 2 kez cagirildi
+    assert errors[0]["retry_count"] == 2  # Called twice
 
 
 def test_is_permanently_failed(tmp_path, monkeypatch):

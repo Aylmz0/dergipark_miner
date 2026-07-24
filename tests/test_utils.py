@@ -39,7 +39,7 @@ def test_retry_sync_all_failures():
         assert "kalıcı hata" in str(e)
         assert call_count == 3
     else:
-        raise AssertionError("hata fırlatilmadi")
+        raise AssertionError("Exception not raised")
 
 
 def test_retry_async_success_after_failures():
@@ -75,7 +75,7 @@ def test_retry_async_all_failures():
         assert "yok" in str(e)
         assert call_count == 2
     else:
-        raise AssertionError("hata fırlatilmadi")
+        raise AssertionError("Exception not raised")
 
 
 def test_setup_logger_creates_error_log(tmp_path, monkeypatch):
@@ -139,8 +139,8 @@ def test_retry_404_raises_immediately():
     except NotFoundError:
         pass
     else:
-        raise AssertionError("Hata firlatilmadi")
-    assert call_count == 1  # sadece 1 deneme, hemen firlatti
+        raise AssertionError("Exception not raised")
+    assert call_count == 1  # Only 1 attempt, raised immediately
 
 
 def test_retry_500_retries():
@@ -163,8 +163,8 @@ def test_retry_500_retries():
     except ServerError:
         pass
     else:
-        raise AssertionError("Hata firlatilmadi")
-    assert call_count == 3  # 3 deneme yapildi
+        raise AssertionError("Exception not raised")
+    assert call_count == 3  # 3 attempts made
 
 
 def test_checkpoint_roundtrip(tmp_path):

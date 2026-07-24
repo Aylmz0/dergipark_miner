@@ -3,6 +3,7 @@
 import asyncio
 import functools
 import inspect
+import json
 import os
 import time
 from collections.abc import Callable
@@ -74,7 +75,7 @@ def retry(
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
                     logger.warning(
-                        "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
+                        "Attempt {}/{} failed: {} (wait: {:.1f}s)",
                         attempt,
                         max_attempts,
                         exc,
@@ -97,7 +98,7 @@ def retry(
                     last_exc = exc
                     wait = _wait_time(exc, attempt)
                     logger.warning(
-                        "Deneme {}/{} basarisiz: {} (bekleme: {:.1f}s)",
+                        "Attempt {}/{} failed: {} (wait: {:.1f}s)",
                         attempt,
                         max_attempts,
                         exc,
@@ -133,7 +134,7 @@ def setup_logger() -> None:
 
     log_level = os.environ.get("LOGURU_LEVEL", "INFO").upper()
 
-    # Varsayılan handler'ları kaldır, konsol handler'ı INFO ile yeniden ekle
+    # Remove default handler, add console handler with INFO level
     logger.remove()
     logger.add(
         lambda msg: print(msg, end=""),
@@ -141,7 +142,7 @@ def setup_logger() -> None:
         format="{time:HH:mm:ss} | {level: <8} | {message}",
     )
 
-    # Dosya handler'ı: sadece ERROR+, rotate 10MB
+    # File handler: ERROR+ only, rotate 10MB
     logger.add(
         data_dir / "error.log",
         level="ERROR",
@@ -161,8 +162,6 @@ def save_checkpoint(path: str | Path = "checkpoint.json", *, state: dict) -> Non
     """
     path = Path(path)
     tmp = path.with_suffix(".tmp")
-    import json
-
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.rename(path)
 
@@ -180,11 +179,9 @@ def load_checkpoint(path: str | Path = "checkpoint.json") -> dict:
     if not path.exists():
         return {}
     try:
-        import json
-
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        logger.warning("Checkpoint dosyasi bozuk: {}", path)
+        logger.warning("Checkpoint file corrupt: {}", path)
         return {}
 
 

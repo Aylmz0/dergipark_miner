@@ -10,12 +10,29 @@ from loguru import logger
 
 
 def _normalize_doi(doi: str | None) -> str | None:
+    """Remove https://doi.org/ or http://doi.org/ prefix from a DOI.
+
+    Args:
+        doi: DOI string or None.
+
+    Returns:
+        Normalized DOI string, or None if input was None/empty.
+    """
     if not doi:
         return None
     return doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
 
 
 def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
+    """Build a JSONL row dict for one article with authors and citations.
+
+    Args:
+        conn: SQLite connection.
+        article: Dict with article fields (id, title, doi, etc.).
+
+    Returns:
+        Dict ready for JSON serialization.
+    """
     authors = [
         r[0]
         for r in conn.execute(

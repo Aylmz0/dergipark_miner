@@ -49,7 +49,7 @@ async def fetch_openalex_work(
     r.raise_for_status()
     data = r.json()
 
-    # DOI ile dogrudan cekimde sonuc tek dict; search ile results listesi
+    # Direct DOI lookup returns single dict; search returns results list
     if "id" in data:
         return data
     results = data.get("results", [])
@@ -111,7 +111,7 @@ async def enrich_article_citations(
         work = await fetch_openalex_work(client, doi=doi, title=title)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            logger.debug("Makale {} OpenAlex'de bulunamadi", article_id)
+            logger.debug("Article {} not found in OpenAlex", article_id)
             return 0
         raise
     if not work:
@@ -177,7 +177,7 @@ async def enrich_all_articles(
         if not rows:
             break
 
-        logger.info("Zenginlestirme batch: {} makale (toplam: {})", len(rows), total_enriched)
+        logger.info("Enrichment batch: {} articles (total: {})", len(rows), total_enriched)
 
         enriched = 0
         citations_added = 0
@@ -200,7 +200,7 @@ async def enrich_all_articles(
                     await asyncio.sleep(0.15)
                 except httpx.HTTPStatusError as exc:
                     if exc.response.status_code == 404:
-                        # OpenAlex'de yok — isaretledik, tekrar denemeyecek
+                        # Not in OpenAlex — mark it, don't retry
                         conn.execute(
                             "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
                             (article_id,),
@@ -208,17 +208,17 @@ async def enrich_all_articles(
                         conn.commit()
                         enriched += 1
                     else:
-                        # Gecici hata (500/502/503) — enriched_at SET ETME, tekrar denensin
+                        # Transient error (500/502/503) — don't set enriched_at, retry later
                         failed += 1
                         logger.warning(
-                            "Makale {} zenginlestirilemedi ({}): {}",
+                            "Article {} enrichment failed ({}): {}",
                             article_id,
                             exc.response.status_code,
                             exc,
                         )
                 except Exception:
                     failed += 1
-                    logger.exception("Makale {} zenginlestirilemedi", article_id)
+                    logger.exception("Article {} enrichment failed", article_id)
 
         tasks = [_process(aid, doi or "", title or "") for aid, doi, title in rows]
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -231,7 +231,7 @@ async def enrich_all_articles(
             on_batch_done(total_enriched, total_citations, total_failed)
 
     logger.info(
-        "Zenginlestirme tamamlandi: enriched={}, citations={}, failed={}",
+        "Enrichment done: enriched={}, citations={}, failed={}",
         total_enriched,
         total_citations,
         total_failed,
@@ -291,7 +291,7 @@ async def enrich_existing_citations(
             break
 
         logger.info(
-            "Citation zenginlestirme batch: {} satir (toplam: {})", len(rows), total_enriched
+            "Citation enrichment batch: {} rows (total: {})", len(rows), total_enriched
         )
 
         enriched = 0
@@ -330,7 +330,7 @@ async def enrich_existing_citations(
                         linked += 1
                     await asyncio.sleep(0.15)
                 except httpx.HTTPStatusError as exc:
-                    # 404 bile olsa isaretledik
+                    # Mark even on 404
                     conn.execute(
                         "UPDATE citations SET cited_doi = '__not_found__' WHERE id = ?",
                         (citation_id,),
@@ -338,17 +338,17 @@ async def enrich_existing_citations(
                     conn.commit()
                     enriched += 1
                     if exc.response.status_code != 404:
-                        logger.warning("Citation {} zenginlestirilemedi: {}", citation_id, exc)
+                        logger.warning("Citation {} enrichment failed: {}", citation_id, exc)
                 except Exception:
                     failed += 1
-                    logger.exception("Citation {} zenginlestirilemedi", citation_id)
+                    logger.exception("Citation {} enrichment failed", citation_id)
 
         tasks = [_process(cid, oid) for cid, oid in rows]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Ilerleme yoksa dur (sonsuz dongu onleme)
+        # Stop if no progress (prevent infinite loop)
         if enriched == 0 and failed > 0:
-            logger.warning("Citation batch'te ilerleme yok, duruluyor ({} basarisiz)", failed)
+            logger.warning("No progress in citation batch, stopping ({} failed)", failed)
             total_failed += failed
             break
 
@@ -360,7 +360,7 @@ async def enrich_existing_citations(
             on_batch_done(total_enriched, total_linked, total_failed)
 
     logger.info(
-        "Citation zenginlestirme tamamlandi: enriched={}, linked={}, failed={}",
+        "Citation enrichment done: enriched={}, linked={}, failed={}",
         total_enriched,
         total_linked,
         total_failed,

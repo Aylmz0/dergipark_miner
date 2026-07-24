@@ -74,25 +74,25 @@ def init_db(path: str | Path) -> sqlite3.Connection:
         """
     )
 
-    # Eski veritabaninda oai_identifier kolonu eksik olabilir; ekle
+    # Old databases may be missing oai_identifier column; add it
     cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
     if "oai_identifier" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN oai_identifier TEXT")
 
-    # cited_openalex_id kolonu eksik olabilir; ekle
+    # cited_openalex_id column may be missing; add it
     cit_cols = {row[1] for row in conn.execute("PRAGMA table_info(citations)").fetchall()}
     if "cited_openalex_id" not in cit_cols:
         conn.execute("ALTER TABLE citations ADD COLUMN cited_openalex_id TEXT")
 
-    # enriched_at kolonu eksik olabilir; ekle
+    # enriched_at column may be missing; add it
     if "enriched_at" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN enriched_at TEXT")
 
-    # content_hash kolonu eksik olabilir; ekle (dedup icin)
+    # content_hash column may be missing; add it (for dedup)
     if "content_hash" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
 
-    # Performans icin indexler
+    # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi)")
@@ -187,7 +187,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
 
     article_id = None
 
-    # 1. oai_identifier ile bul
+    # 1. Find by oai_identifier
     if oai_identifier:
         existing = conn.execute(
             "SELECT id FROM articles WHERE oai_identifier = ?", (oai_identifier,)
@@ -203,7 +203,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                 (journal_id, title, doi, publication_date, oai_identifier, article_id),
             )
 
-    # 2. DOI ile bul
+    # 2. Find by DOI
     if article_id is None and doi:
         existing = conn.execute("SELECT id FROM articles WHERE doi = ?", (doi,)).fetchone()
         if existing:
@@ -217,7 +217,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                 (journal_id, title, publication_date, oai_identifier, article_id),
             )
 
-    # 3. Content hash ile bul (DOI ve OAI ID yoksa)
+    # 3. Find by content hash (when no DOI or OAI ID)
     if article_id is None and not oai_identifier and not doi and title:
         content_hash = _make_content_hash(title, journal_id, publication_date)
         existing = conn.execute(
@@ -226,7 +226,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
         if existing:
             article_id = existing[0]
 
-    # 4. Yeni satir
+    # 4. Insert new row
     if article_id is None:
         content_hash = None
         if not oai_identifier and not doi and title:
@@ -294,7 +294,7 @@ def insert_citation(
     doi = (cited_doi or "").strip()
     title = (cited_title or "").strip()
 
-    # Dedup: ayni citing + cited_openalex_id varsa mevcut satiri dondur
+    # Dedup: if same citing + cited_openalex_id exists, return existing row
     if openalex_id:
         row = conn.execute(
             "SELECT id FROM citations WHERE citing_article_id = ? AND cited_openalex_id = ?",

@@ -50,17 +50,17 @@ def _save_ckpt(ckpt: dict) -> None:
     try:
         save_checkpoint(CHECKPOINT_PATH, state=ckpt)
     except Exception:
-        logger.warning("Checkpoint yazilamadi")
+        logger.warning("Checkpoint write failed")
 
 
 def _handle_signal(signum, frame):
     """Handle SIGINT/SIGTERM for graceful shutdown."""
     global _shutdown_requested
     if _shutdown_requested:
-        logger.warning("Tekrar Ctrl+C — zorla cikiliyor")
+        logger.warning("Second Ctrl+C — forcing exit")
         raise SystemExit(1)
     _shutdown_requested = True
-    logger.warning("Ctrl+C alindi — mevcut isler tamamlanip cikiliyor...")
+    logger.warning("Ctrl+C received — completing current work then exiting...")
 
 
 def _check_shutdown():
@@ -121,7 +121,7 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                 limit=limit,
             )
         except KeyboardInterrupt:
-            logger.warning("Graceful shutdown — checkpoint kaydediliyor...")
+            logger.warning("Graceful shutdown — saving checkpoint...")
         except Exception:
             logger.exception("Pipeline error")
         finally:

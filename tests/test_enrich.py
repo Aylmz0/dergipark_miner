@@ -367,7 +367,7 @@ def test_enrich_all_articles_skips_already_enriched(tmp_path):
     _make_article(conn, oai_id="oai:test:enriched1", doi="10.1111/done")
     _make_article(conn, oai_id="oai:test:notdone1", doi="10.2222/todo")
 
-    # Ilkini isaretledik
+    # Mark first article as enriched
     conn.execute(
         "UPDATE articles SET enriched_at = datetime('now') WHERE oai_identifier = ?",
         ("oai:test:enriched1",),
