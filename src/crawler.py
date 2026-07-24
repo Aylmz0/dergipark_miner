@@ -246,6 +246,22 @@ def _node_text(node) -> str:
     return inner.strip()
 
 
+def _split_records(xml_text: str) -> list[str]:
+    """Split an OAI-PMH ListRecords page into individual <record> XML strings.
+
+    Each page contains up to 100 records. parse_article_metadata expects
+    a single record, so we must split before calling it.
+
+    Args:
+        xml_text: Full OAI-PMH ListRecords XML page.
+
+    Returns:
+        List of individual <record>...</record> XML strings.
+    """
+    parts = xml_text.split("<record>")
+    return ["<record>" + p.split("</record>")[0] + "</record>" for p in parts if "</record>" in p]
+
+
 def parse_article_metadata(xml_text: str) -> dict:
     """Parse article metadata from a single OAI-PMH (oai_dc) XML record.
 
@@ -423,39 +439,33 @@ async def download_pdf(
     client: httpx.AsyncClient,
     pdf_url: str,
     dest_path: Path,
-    *,
-    inter_request_delay: float = 2.0,
 ) -> bool:
     """PDF dosyasini stream modunda indirir.
+
+    Exceptions propagate to caller for proper transient/permanent classification.
 
     Args:
         client: httpx.AsyncClient.
         pdf_url: URL of the PDF file.
         dest_path: Destination file path (e.g. data/raw_pdfs/oai_id.pdf).
-        inter_request_delay: Delay after download in seconds (rate-limit).
 
     Returns:
-        True if download succeeded, False otherwise.
+        True if download succeeded.
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
     logger.debug("PDF indiriliyor: {} -> {}", pdf_url, dest_path)
-    try:
-        async with client.stream(
-            "GET", pdf_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
-        ) as resp:
-            resp.raise_for_status()
-            with open(dest_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=8192):
-                    f.write(chunk)
+    async with client.stream(
+        "GET", pdf_url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True
+    ) as resp:
+        resp.raise_for_status()
+        with open(dest_path, "wb") as f:
+            async for chunk in resp.aiter_bytes(chunk_size=8192):
+                f.write(chunk)
 
-        size_kb = dest_path.stat().st_size / 1024
-        logger.info("PDF indirildi: {} ({:.1f} KB)", dest_path.name, size_kb)
-        await asyncio.sleep(inter_request_delay)
-        return True
-    except Exception as exc:
-        logger.error("PDF indirilemedi: {} -> {}", pdf_url, exc)
-        return False
+    size_kb = dest_path.stat().st_size / 1024
+    logger.info("PDF indirildi: {} ({:.1f} KB)", dest_path.name, size_kb)
+    return True
 
 
 def load_pdf_errors() -> list[dict]:

@@ -4,6 +4,7 @@ import asyncio
 import threading
 
 import httpx
+import pytest
 
 from src.crawler import (
     download_pdf,
@@ -366,8 +367,8 @@ def test_download_pdf_handles_error(tmp_path):
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     dest = tmp_path / "missing.pdf"
-    result = asyncio.run(download_pdf(client, "https://example.com/missing.pdf", dest))
-    assert result is False
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(download_pdf(client, "https://example.com/missing.pdf", dest))
     assert not dest.exists()
 
 

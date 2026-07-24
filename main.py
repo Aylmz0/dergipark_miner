@@ -20,6 +20,7 @@ from loguru import logger
 
 from src.crawler import (
     DEFAULT_USER_AGENT,
+    _split_records,
     download_pdf,
     fetch_article_pdf_url,
     fetch_journals,
@@ -119,18 +120,22 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
 
         # 3. OAI-PMH harvest + parse + insert (streaming)
         remaining_names = [j["short_name"] for j in remaining]
-        max_per_journal = limit if limit > 0 else 999999
+        if limit > 0:
+            remaining_names = remaining_names[:limit]
+            logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
+        max_per_journal = 999999
 
         def on_journal_done(shortname: str, xml_pages: list[str]) -> None:
             """Called when each journal harvest completes: parse XML and write to DB."""
             nonlocal processed_articles
             for xml_text in xml_pages:
-                try:
-                    meta = parse_article_metadata(xml_text)
-                    insert_article(conn, meta)
-                    processed_articles += 1
-                except Exception as exc:
-                    failed_articles.append({"shortname": shortname, "error": str(exc)})
+                for record_xml in _split_records(xml_text):
+                    try:
+                        meta = parse_article_metadata(record_xml)
+                        insert_article(conn, meta)
+                        processed_articles += 1
+                    except Exception as exc:
+                        failed_articles.append({"shortname": shortname, "error": str(exc)})
 
             if xml_pages:
                 # Success — add to processed list
@@ -179,7 +184,7 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
 
         _save_ckpt(ckpt)
 
-        # 4. PDF indirme
+        # 4. PDF indirme (rate-limit aware: adaptive delay between downloads)
         try:
             articles = conn.execute(
                 """
@@ -191,11 +196,13 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
 
             pdf_checkpoint_interval = 50
             pdf_counter = 0
+            pdf_delay = 1.5  # adaptive delay between PDF downloads
 
             async def _download_one(
                 oai_id: str, journal: str, pdf_path: Path
             ) -> tuple[bool, bool]:
                 """Download a single PDF. Returns (downloaded, failed)."""
+                nonlocal pdf_delay
                 article_url = (
                     f"https://dergipark.org.tr/tr/pub/{journal}/article/"
                     f"{oai_id.split('/')[-1]}"
@@ -208,16 +215,32 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                     ok = await download_pdf(client, pdf_url, pdf_path)
                     if ok:
                         remove_pdf_error(oai_id)
+                        pdf_delay = max(pdf_delay * 0.9, 1.0)
                         return True, False
                     log_pdf_error(oai_id, article_url, "PDF download failed")
                     return False, True
                 except httpx.HTTPStatusError as exc:
                     is_transient = exc.response.status_code in (429, 500, 502, 503)
+                    if exc.response.status_code == 429:
+                        pdf_delay = min(pdf_delay * 2.0, 30.0)
+                        logger.warning("429 on PDF, delay now: {:.1f}s", pdf_delay)
                     log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
                     return False, True
                 except Exception as exc:
                     log_pdf_error(oai_id, article_url, str(exc))
                     return False, True
+
+            async def _do_download(oai_id: str, journal: str, pdf_path: Path) -> None:
+                nonlocal pdf_downloaded, pdf_failed, pdf_counter
+                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
+                pdf_downloaded += downloaded
+                pdf_failed += failed
+                pdf_counter += 1
+                if pdf_counter % pdf_checkpoint_interval == 0:
+                    ckpt["pdf_downloaded"] = pdf_downloaded
+                    ckpt["pdf_failed"] = pdf_failed
+                    _save_ckpt(ckpt)
+                await asyncio.sleep(pdf_delay)
 
             # Retry previously failed PDFs first
             pdf_errors = load_pdf_errors()
@@ -236,14 +259,7 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                 _, journal = row
                 safe_name = oai_id.replace("/", "_") + ".pdf"
                 pdf_path = Path("data/raw_pdfs") / safe_name
-                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
-                pdf_downloaded += downloaded
-                pdf_failed += failed
-                pdf_counter += 1
-                if pdf_counter % pdf_checkpoint_interval == 0:
-                    ckpt["pdf_downloaded"] = pdf_downloaded
-                    ckpt["pdf_failed"] = pdf_failed
-                    _save_ckpt(ckpt)
+                await _do_download(oai_id, journal, pdf_path)
 
             # Then normal download
             for _article_id, oai_id, journal in articles:
@@ -255,19 +271,46 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                     continue
                 if is_permanently_failed(oai_id, max_retries=5):
                     continue
-                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
-                pdf_downloaded += downloaded
-                pdf_failed += failed
-                pdf_counter += 1
-                if pdf_counter % pdf_checkpoint_interval == 0:
-                    ckpt["pdf_downloaded"] = pdf_downloaded
-                    ckpt["pdf_failed"] = pdf_failed
-                    _save_ckpt(ckpt)
+                await _do_download(oai_id, journal, pdf_path)
 
             ckpt["pdf_downloaded"] = pdf_downloaded
             ckpt["pdf_failed"] = pdf_failed
             _save_ckpt(ckpt)
             logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
+
+            # Retry loop: retry transient (429) failures up to 2 more rounds
+            for retry_round in range(1, 3):
+                pdf_errors = load_pdf_errors()
+                retry_candidates = [
+                    e for e in pdf_errors
+                    if not is_permanently_failed(e.get("oai_id", ""), max_retries=5)
+                    and e.get("retry_count", 0) < 3
+                ]
+                if not retry_candidates:
+                    break
+                logger.info("PDF retry round {}: {} candidates", retry_round, len(retry_candidates))
+                pdf_delay = min(pdf_delay * 2.0, 30.0)
+                for entry in retry_candidates:
+                    oai_id = entry.get("oai_id", "")
+                    row = conn.execute(
+                        "SELECT a.id, j.short_name FROM articles a "
+                        "JOIN journals j ON a.journal_id = j.id "
+                        "WHERE a.oai_identifier = ?",
+                        (oai_id,),
+                    ).fetchone()
+                    if not row:
+                        continue
+                    _, journal = row
+                    safe_name = oai_id.replace("/", "_") + ".pdf"
+                    pdf_path = Path("data/raw_pdfs") / safe_name
+                    if pdf_path.exists():
+                        continue
+                    await _do_download(oai_id, journal, pdf_path)
+
+            ckpt["pdf_downloaded"] = pdf_downloaded
+            ckpt["pdf_failed"] = pdf_failed
+            _save_ckpt(ckpt)
+            logger.info("PDF final: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
         except Exception:
             logger.exception("PDF download error")
 
@@ -337,7 +380,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-enrich", action="store_true", help="Skip OpenAlex enrichment"
     )
-    parser.add_argument("--limit", type=int, default=0, help="Max articles per journal (0=unlimited)")
+    parser.add_argument("--limit", type=int, default=0, help="Max journals to process (0=unlimited, all articles fetched)")
     args = parser.parse_args()
 
     asyncio.run(run(skip_enrich=args.skip_enrich, limit=args.limit))

@@ -28,11 +28,24 @@ def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
         (article["id"],),
     ).fetchall():
         citations.append({"title": c[0], "doi": _normalize_doi(c[1]), "openalex_id": c[2]})
+
+    oai_id = article.get("oai_identifier") or ""
+    slug = article["journal_short"]
+    article_number = oai_id.split("/")[-1] if "/" in oai_id else ""
+    url = f"https://dergipark.org.tr/tr/pub/{slug}/article/{article_number}" if article_number else ""
+
+    pdf_name = oai_id.replace("/", "_") + ".pdf" if oai_id else ""
+    pdf_path = Path("data/raw_pdfs") / pdf_name
+    pdf_downloaded = pdf_path.exists() if pdf_name else False
+
     return {
-        "slug": article["journal_short"],
+        "slug": slug,
         "title": article["title"],
         "doi": _normalize_doi(article["doi"]),
         "date": article["publication_date"],
+        "oai_identifier": oai_id,
+        "url": url,
+        "pdf_downloaded": pdf_downloaded,
         "authors": authors,
         "citations": citations,
     }
