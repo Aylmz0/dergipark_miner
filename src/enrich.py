@@ -86,11 +86,11 @@ async def enrich_article_citations(
     article_id: int,
     article: dict,
     conn: sqlite3.Connection,
-) -> int:
-    """Fetch citation list for one article from OpenAlex and write to DB.
+) -> tuple[int, int]:
+    """Fetch citation list and open access status for one article from OpenAlex.
 
     Looks up the article by DOI or title in OpenAlex, then inserts
-    each referenced_work as a citation row.
+    each referenced_work as a citation row. Also extracts is_oa status.
 
     Args:
         client: Async HTTP client.
@@ -99,23 +99,23 @@ async def enrich_article_citations(
         conn: SQLite connection.
 
     Returns:
-        Number of citations written.
+        Tuple of (citations_written, is_oa_flag).
     """
     doi = article.get("doi") or ""
     title = article.get("title") or ""
 
     if not doi and not title:
-        return 0
+        return 0, 0
 
     try:
         work = await fetch_openalex_work(client, doi=doi, title=title)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             logger.debug("Article {} not found in OpenAlex", article_id)
-            return 0
+            return 0, 0
         raise
     if not work:
-        return 0
+        return 0, 0
 
     ref_ids = work.get("referenced_works") or []
     count = 0
@@ -129,7 +129,11 @@ async def enrich_article_citations(
         )
         count += 1
 
-    return count
+    # Extract is_oa from open_access.is_oa
+    open_access = work.get("open_access") or {}
+    is_oa = 1 if open_access.get("is_oa") else 0
+
+    return count, is_oa
 
 
 async def enrich_all_articles(
@@ -187,12 +191,12 @@ async def enrich_all_articles(
             nonlocal enriched, citations_added, failed
             async with sem:
                 try:
-                    count = await enrich_article_citations(
+                    count, is_oa = await enrich_article_citations(
                         client, article_id, {"doi": doi, "title": title}, conn
                     )
                     conn.execute(
-                        "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
-                        (article_id,),
+                        "UPDATE articles SET enriched_at = datetime('now'), is_oa = ? WHERE id = ?",
+                        (is_oa, article_id),
                     )
                     conn.commit()
                     enriched += 1
@@ -202,7 +206,7 @@ async def enrich_all_articles(
                     if exc.response.status_code == 404:
                         # Not in OpenAlex — mark it, don't retry
                         conn.execute(
-                            "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
+                            "UPDATE articles SET enriched_at = datetime('now'), is_oa = 0 WHERE id = ?",
                             (article_id,),
                         )
                         conn.commit()

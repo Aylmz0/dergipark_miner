@@ -60,10 +60,29 @@ def test_export_all_articles_structure(tmp_path, conn):
     out = export_all_articles(conn, tmp_path / "all.jsonl")
     first = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
     assert first["slug"] == "ihad"
+    assert first["article_id"] == "oai:dergipark:article/1"
+    assert first["article_url"] == "https://dergipark.org.tr/tr/pub/ihad/article/1"
     assert first["title"] == "Makale I"
     assert first["doi"] == "10.1234/test.1"
     assert first["date"] == "2024-01-01"
     assert first["authors"] == ["Yazar, Ali", "Yazar, Veli"]
+    assert first["journal_title"] == ""
+    assert first["issn"] == ""
+    assert first["publisher"] == ""
+    assert first["volume"] == ""
+    assert first["issue"] == ""
+    assert first["firstpage"] == ""
+    assert first["lastpage"] == ""
+    assert first["pages"] == ""
+    assert first["language"] == ""
+    assert first["abstract"] == ""
+    assert first["is_oa"] is False
+    assert first["pdf_url"] is None
+    assert first["keywords"] == []
+    assert first["orcid"] == []
+    assert first["article_type"] == ""
+    assert first["references"] == []
+    assert first["metadata"] == []
     assert len(first["citations"]) == 2
 
 

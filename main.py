@@ -15,6 +15,7 @@ Usage:
 import argparse
 import asyncio
 import contextlib
+import json
 import signal
 from pathlib import Path
 
@@ -85,31 +86,60 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
     if not oai_id:
         return
     row = conn.execute(
-        "SELECT id, abstract, keywords, language FROM articles WHERE oai_identifier = ?",
+        "SELECT id FROM articles WHERE oai_identifier = ?",
         (oai_id,),
     ).fetchone()
     if not row:
         return
-    article_id, cur_abstract, cur_keywords, cur_language = row
+    article_id = row[0]
+
+    # Read current values to avoid overwriting
+    cur = conn.execute(
+        "SELECT abstract, keywords, language, journal_title, issn, publisher, "
+        "volume, issue, firstpage, lastpage, pages, pdf_url, orcid, "
+        "article_type, [references], metadata FROM articles WHERE id = ?",
+        (article_id,),
+    ).fetchone()
+    if not cur:
+        return
+
+    (cur_abstract, cur_keywords, cur_language, cur_journal_title, cur_issn,
+     cur_publisher, cur_volume, cur_issue, cur_firstpage, cur_lastpage,
+     cur_pages, cur_pdf_url, cur_orcid, cur_article_type, cur_references,
+     cur_metadata) = cur
 
     updates: list[str] = []
     params: list = []
 
-    # abstract: update if empty
-    if not cur_abstract and html_meta.get("abstract"):
-        updates.append("abstract = ?")
-        params.append(html_meta["abstract"])
+    # Helper: update if current is empty and new value exists
+    def _add(col: str, cur_val, new_val, serialize: bool = False):
+        if not cur_val and new_val:
+            updates.append(f"{col} = ?")
+            params.append(json.dumps(new_val, ensure_ascii=False) if serialize else new_val)
 
-    # keywords: update if empty
-    if not cur_keywords and html_meta.get("keywords"):
-        import json
-        updates.append("keywords = ?")
-        params.append(json.dumps(html_meta["keywords"], ensure_ascii=False))
+    _add("abstract", cur_abstract, html_meta.get("abstract"))
+    _add("keywords", cur_keywords, html_meta.get("keywords"), serialize=True)
+    _add("language", cur_language, html_meta.get("language"))
+    _add("journal_title", cur_journal_title, html_meta.get("journal_title"))
+    _add("issn", cur_issn, html_meta.get("issn"))
+    _add("publisher", cur_publisher, html_meta.get("publisher"))
+    _add("volume", cur_volume, html_meta.get("volume"))
+    _add("issue", cur_issue, html_meta.get("issue"))
+    _add("firstpage", cur_firstpage, html_meta.get("firstpage"))
+    _add("lastpage", cur_lastpage, html_meta.get("lastpage"))
+    _add("pages", cur_pages, html_meta.get("pages"))
+    _add("pdf_url", cur_pdf_url, html_meta.get("pdf_url"))
+    _add("orcid", cur_orcid, html_meta.get("orcid"), serialize=True)
+    _add("article_type", cur_article_type, html_meta.get("article_type"))
+    _add("[references]", cur_references, html_meta.get("references"), serialize=True)
 
-    # language: update if empty
-    if not cur_language and html_meta.get("language"):
-        updates.append("language = ?")
-        params.append(html_meta["language"])
+    # metadata: store full meta dict
+    if not cur_metadata and html_meta:
+        # Filter out empty values to keep metadata compact
+        meta = {k: v for k, v in html_meta.items() if v}
+        if meta:
+            updates.append("metadata = ?")
+            params.append(json.dumps(meta, ensure_ascii=False))
 
     if updates:
         params.append(article_id)

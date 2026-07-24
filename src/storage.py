@@ -68,6 +68,20 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             abstract       TEXT,
             keywords       TEXT,
             language       TEXT,
+            journal_title  TEXT,
+            issn           TEXT,
+            publisher      TEXT,
+            volume         TEXT,
+            issue          TEXT,
+            firstpage      TEXT,
+            lastpage       TEXT,
+            pages          TEXT,
+            pdf_url        TEXT,
+            orcid          TEXT,
+            article_type   TEXT,
+            [references]   TEXT,
+            metadata       TEXT,
+            is_oa          INTEGER,
             enriched_at    TEXT,
             content_hash   TEXT,
             created_at     TEXT DEFAULT (datetime('now')),
@@ -125,6 +139,62 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     # language column may be missing; add it
     if "language" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN language TEXT")
+
+    # journal_title column may be missing; add it
+    if "journal_title" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN journal_title TEXT")
+
+    # issn column may be missing; add it
+    if "issn" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN issn TEXT")
+
+    # publisher column may be missing; add it
+    if "publisher" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN publisher TEXT")
+
+    # volume column may be missing; add it
+    if "volume" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN volume TEXT")
+
+    # issue column may be missing; add it
+    if "issue" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN issue TEXT")
+
+    # firstpage column may be missing; add it
+    if "firstpage" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN firstpage TEXT")
+
+    # lastpage column may be missing; add it
+    if "lastpage" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN lastpage TEXT")
+
+    # pages column may be missing; add it
+    if "pages" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN pages TEXT")
+
+    # pdf_url column may be missing; add it
+    if "pdf_url" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN pdf_url TEXT")
+
+    # orcid column may be missing; add it
+    if "orcid" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN orcid TEXT")
+
+    # article_type column may be missing; add it
+    if "article_type" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN article_type TEXT")
+
+    # references column may be missing; add it
+    if "references" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN [references] TEXT")
+
+    # metadata column may be missing; add it
+    if "metadata" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN metadata TEXT")
+
+    # is_oa column may be missing; add it
+    if "is_oa" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN is_oa INTEGER")
 
     # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
@@ -206,7 +276,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
         conn: SQLite connection.
         article: Dict with keys: title, doi, authors, publication_date,
                  journal_shortname, oai_identifier, journal_name,
-                 abstract, keywords, language.
+                 abstract, keywords, language, and all HTML-scraped fields.
 
     Returns:
         The article's row ID.

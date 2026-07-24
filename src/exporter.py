@@ -23,13 +23,13 @@ def _normalize_doi(doi: str | None) -> str | None:
     return doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
 
 
-def _json_loads(text: str | None) -> list:
-    """Deserialize a JSON string to list, returning [] on failure."""
+def _json_loads(text: str | None) -> list | dict:
+    """Deserialize a JSON string, returning [] on failure."""
     if not text:
         return []
     try:
         result = json.loads(text)
-        return result if isinstance(result, list) else []
+        return result if isinstance(result, (list, dict)) else []
     except (json.JSONDecodeError, TypeError):
         return []
 
@@ -64,23 +64,32 @@ def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
     article_number = oai_id.split("/")[-1] if "/" in oai_id else ""
     url = f"https://dergipark.org.tr/tr/pub/{slug}/article/{article_number}" if article_number else ""
 
-    pdf_name = oai_id.replace("/", "_") + ".pdf" if oai_id else ""
-    pdf_path = Path("data/raw_pdfs") / pdf_name
-    pdf_downloaded = pdf_path.exists() if pdf_name else False
-
     return {
         "slug": slug,
+        "article_id": oai_id,
+        "article_url": url,
         "title": article["title"],
-        "doi": _normalize_doi(article["doi"]),
-        "date": article["publication_date"],
-        "oai_identifier": oai_id,
-        "url": url,
-        "pdf_downloaded": pdf_downloaded,
-        "abstract": article.get("abstract") or "",
-        "keywords": _json_loads(article.get("keywords")),
-        "language": article.get("language") or "",
         "authors": authors,
+        "journal_title": article.get("journal_title") or "",
+        "issn": article.get("issn") or "",
+        "publisher": article.get("publisher") or "",
+        "volume": article.get("volume") or "",
+        "issue": article.get("issue") or "",
+        "firstpage": article.get("firstpage") or "",
+        "lastpage": article.get("lastpage") or "",
+        "pages": article.get("pages") or "",
+        "date": article["publication_date"],
+        "language": article.get("language") or "",
+        "doi": _normalize_doi(article["doi"]),
+        "abstract": article.get("abstract") or "",
+        "is_oa": bool(article.get("is_oa")),
+        "pdf_url": article.get("pdf_url") or None,
+        "keywords": _json_loads(article.get("keywords")),
+        "orcid": _json_loads(article.get("orcid")),
+        "article_type": article.get("article_type") or "",
+        "references": _json_loads(article.get("references")),
         "citations": citations,
+        "metadata": _json_loads(article.get("metadata")),
     }
 
 
@@ -90,9 +99,11 @@ def export_all_articles(
 ) -> Path:
     """Export all articles to a single JSONL file.
 
-    Articles are sorted by journal slug, then by ID. Each line contains:
-    {"slug": ..., "title": ..., "doi": ..., "date": ..., "abstract": ...,
-     "keywords": [...], "language": ..., "authors": [...], "citations": [...]}
+    Articles are sorted by journal slug, then by ID. Each line contains
+    all metadata fields: slug, article_id, article_url, title, authors,
+    journal_title, issn, publisher, volume, issue, firstpage, lastpage,
+    pages, date, language, doi, abstract, is_oa, pdf_url, keywords,
+    orcid, article_type, references, citations, metadata.
 
     Per-row error handling: if a single article fails to build, it is skipped
     and counted as failed. The export does not crash on bad data.
@@ -113,6 +124,9 @@ def export_all_articles(
         """
         SELECT a.id, a.title, a.doi, a.publication_date,
                a.oai_identifier, a.abstract, a.keywords, a.language,
+               a.journal_title, a.issn, a.publisher, a.volume, a.issue,
+               a.firstpage, a.lastpage, a.pages, a.pdf_url,
+               a.orcid, a.article_type, a.[references], a.metadata, a.is_oa,
                j.short_name AS journal_short
         FROM articles a
         JOIN journals j ON a.journal_id = j.id

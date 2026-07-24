@@ -433,7 +433,8 @@ def scrape_article_html_metadata(html: str) -> dict:
     """Extract rich metadata from DergiPark article page HTML <meta> tags.
 
     Extracts: abstract, keywords, language, orcid (list), article_type,
-    issn, issue, references (list).
+    issn, issue, references (list), publisher, volume, firstpage, lastpage,
+    pages, pdf_url, journal_title.
 
     Args:
         html: Raw HTML of a DergiPark article detail page.
@@ -451,6 +452,13 @@ def scrape_article_html_metadata(html: str) -> dict:
         "issn": "",
         "issue": "",
         "references": [],
+        "publisher": "",
+        "volume": "",
+        "firstpage": "",
+        "lastpage": "",
+        "pages": "",
+        "pdf_url": "",
+        "journal_title": "",
     }
 
     for node in tree.css("meta"):
@@ -476,6 +484,20 @@ def scrape_article_html_metadata(html: str) -> dict:
             result["issue"] = content
         elif name == "citation_reference":
             result["references"].append(content)
+        elif name == "citation_publisher":
+            result["publisher"] = content
+        elif name == "citation_volume":
+            result["volume"] = content
+        elif name == "citation_firstpage":
+            result["firstpage"] = content
+        elif name == "citation_lastpage":
+            result["lastpage"] = content
+        elif name == "dc.identifier.pagenumber":
+            result["pages"] = content
+        elif name == "citation_pdf_url":
+            result["pdf_url"] = content
+        elif (name == "citation_journal_title" or name == "dc.source") and not result["journal_title"]:
+            result["journal_title"] = content
 
     return result
 

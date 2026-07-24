@@ -481,7 +481,13 @@ def test_scrape_article_html_metadata_extracts_all():
     <meta name="DC.Source.Issue" content="39" />
     <meta name="citation_reference" content="Ref A" />
     <meta name="citation_reference" content="Ref B" />
+    <meta name="citation_publisher" content="Springer" />
+    <meta name="citation_volume" content="7" />
+    <meta name="citation_firstpage" content="1" />
+    <meta name="citation_lastpage" content="32" />
+    <meta name="DC.Identifier.pageNumber" content="1-32" />
     <meta name="citation_pdf_url" content="/tr/download/article-file/123" />
+    <meta name="citation_journal_title" content="Test Journal" />
     </head><body></body></html>"""
 
     result = scrape_article_html_metadata(html)
@@ -493,6 +499,13 @@ def test_scrape_article_html_metadata_extracts_all():
     assert result["issn"] == "1234-5678"
     assert result["issue"] == "39"
     assert result["references"] == ["Ref A", "Ref B"]
+    assert result["publisher"] == "Springer"
+    assert result["volume"] == "7"
+    assert result["firstpage"] == "1"
+    assert result["lastpage"] == "32"
+    assert result["pages"] == "1-32"
+    assert result["pdf_url"] == "/tr/download/article-file/123"
+    assert result["journal_title"] == "Test Journal"
 
 
 def test_scrape_article_html_metadata_empty():
@@ -507,6 +520,13 @@ def test_scrape_article_html_metadata_empty():
     assert result["issn"] == ""
     assert result["issue"] == ""
     assert result["references"] == []
+    assert result["publisher"] == ""
+    assert result["volume"] == ""
+    assert result["firstpage"] == ""
+    assert result["lastpage"] == ""
+    assert result["pages"] == ""
+    assert result["pdf_url"] == ""
+    assert result["journal_title"] == ""
 
 
 def test_scrape_article_html_metadata_citation_issn_fallback():

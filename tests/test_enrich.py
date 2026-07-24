@@ -163,8 +163,9 @@ def test_enrich_article_citations_writes_rows(tmp_path):
     aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich1")
     client = _make_client(_ok_handler)
 
-    count = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.1000/test", "title": "Test"}, conn))
+    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.1000/test", "title": "Test"}, conn))
     assert count == 2
+    assert isinstance(is_oa, int)
 
     rows = conn.execute(
         "SELECT cited_openalex_id FROM citations WHERE citing_article_id = ?", (aid,)
@@ -179,8 +180,9 @@ def test_enrich_article_citations_no_work(tmp_path):
     aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich2")
     client = _make_client(_not_found_handler)
 
-    count = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/none", "title": ""}, conn))
+    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/none", "title": ""}, conn))
     assert count == 0
+    assert is_oa == 0
     assert conn.execute("SELECT COUNT(*) FROM citations").fetchone()[0] == 0
     conn.close()
 
@@ -190,8 +192,9 @@ def test_enrich_article_citations_no_doi_no_title(tmp_path):
     aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich3")
     client = _make_client(_ok_handler)
 
-    count = asyncio.run(enrich_article_citations(client, aid, {"doi": "", "title": ""}, conn))
+    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "", "title": ""}, conn))
     assert count == 0
+    assert is_oa == 0
     conn.close()
 
 
@@ -339,8 +342,9 @@ def test_enrich_article_citations_404_does_not_raise(tmp_path):
     aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich404")
     client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
 
-    count = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/missing", "title": ""}, conn))
+    count, is_oa = asyncio.run(enrich_article_citations(client, aid, {"doi": "10.9999/missing", "title": ""}, conn))
     assert count == 0
+    assert is_oa == 0
     conn.close()
 
 
