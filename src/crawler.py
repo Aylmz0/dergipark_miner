@@ -48,7 +48,7 @@ def _extract_journals(html: str) -> list[dict]:
             if not href.startswith("/tr/pub/"):
                 continue
             slug = href[len("/tr/pub/") :].strip("/")
-            if not slug or "/" in slug or slug.startswith("page"):
+            if not slug or "/" in slug:
                 continue
             name = (anchor.text() or "").strip()
             if slug not in journals:
@@ -108,7 +108,9 @@ async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) ->
 
 
 # backward compat alias
-async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int = 1000) -> list[str]:
+async def fetch_journal_shortnames(
+    client: httpx.AsyncClient, *, max_pages: int = 1000
+) -> list[str]:
     """fetch_journals'un eski arayuzu — sadece short_name listesi dondurur."""
     journals = await fetch_journals(client, max_pages=max_pages)
     return [j["short_name"] for j in journals]
@@ -156,13 +158,40 @@ async def harvest_all_journals(
         async with semaphore:
             delay = adaptive_delay.get(shortname) if adaptive_delay else inter_request_delay
             await asyncio.sleep(random.uniform(delay * 0.7, delay * 1.3))
-            url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&metadataPrefix={OAI_METADATA_PREFIX}"
+
+            initial_url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&metadataPrefix={OAI_METADATA_PREFIX}"
+            url = initial_url
             collected_records = 0
+            token_restarts = 0
+            max_token_restarts = 3
+
             try:
                 while collected_records < max_records_per_journal:
-                    body = await _fetch_oai(client, url)
+                    try:
+                        body = await _fetch_oai(client, url)
+                    except Exception as fetch_exc:
+                        # badResumptionToken kontrolu
+                        error_msg = str(fetch_exc).lower()
+                        is_token_error = (
+                            "badresumptiontoken" in error_msg or "resumptiontoken" in error_msg
+                        )
+                        if is_token_error and token_restarts < max_token_restarts:
+                            token_restarts += 1
+                            logger.warning(
+                                "Dergi '{}' token hatasi, basa donuluyor (deneme {}/{})",
+                                shortname,
+                                token_restarts,
+                                max_token_restarts,
+                            )
+                            xml_pages.clear()
+                            collected_records = 0
+                            url = initial_url
+                            await asyncio.sleep(random.uniform(2.0, 5.0))
+                            continue
+                        raise
+
                     xml_pages.append(body)
-                    collected_records += body.count("<record>")
+                    collected_records += len(HTMLParser(body).css("record"))
                     if adaptive_delay:
                         adaptive_delay.on_success(shortname)
                     if "<resumptionToken" not in body:
@@ -408,17 +437,19 @@ def save_pdf_errors(errors: list[dict]) -> None:
     PDF_ERRORS_PATH.write_text(json.dumps(errors, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def log_pdf_error(oai_id: str, article_url: str, error: str) -> None:
+def log_pdf_error(oai_id: str, article_url: str, error: str, is_transient: bool = False) -> None:
     """Basarisiz PDF indirmesini pdf_errors.json'a kaydeder.
 
     Ayni oai_id icin tekrar cagirilirsa retry_count artirilir.
+    is_transient=True ise retry_count artirilmaz (gecici hata).
     """
     from datetime import datetime
 
     errors = load_pdf_errors()
     existing = next((e for e in errors if e.get("oai_id") == oai_id), None)
     if existing:
-        existing["retry_count"] = existing.get("retry_count", 1) + 1
+        if not is_transient:
+            existing["retry_count"] = existing.get("retry_count", 0) + 1
         existing["error"] = error
         existing["last_attempt"] = datetime.now(UTC).isoformat()
     else:
@@ -427,7 +458,7 @@ def log_pdf_error(oai_id: str, article_url: str, error: str) -> None:
                 "oai_id": oai_id,
                 "article_url": article_url,
                 "error": error,
-                "retry_count": 1,
+                "retry_count": 0 if is_transient else 1,
                 "last_attempt": datetime.now(UTC).isoformat(),
             }
         )

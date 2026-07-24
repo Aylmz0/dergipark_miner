@@ -170,15 +170,23 @@ async def enrich_all_articles(
                     citations_added += count
                     await asyncio.sleep(0.15)
                 except httpx.HTTPStatusError as exc:
-                    # 404 bile olsa isaretledik (OpenAlex'de yok)
-                    conn.execute(
-                        "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
-                        (article_id,),
-                    )
-                    conn.commit()
-                    enriched += 1
-                    if exc.response.status_code != 404:
-                        logger.warning("Makale {} zenginlestirilemedi: {}", article_id, exc)
+                    if exc.response.status_code == 404:
+                        # OpenAlex'de yok — isaretledik, tekrar denemeyecek
+                        conn.execute(
+                            "UPDATE articles SET enriched_at = datetime('now') WHERE id = ?",
+                            (article_id,),
+                        )
+                        conn.commit()
+                        enriched += 1
+                    else:
+                        # Gecici hata (500/502/503) — enriched_at SET ETME, tekrar denensin
+                        failed += 1
+                        logger.warning(
+                            "Makale {} zenginlestirilemedi ({}): {}",
+                            article_id,
+                            exc.response.status_code,
+                            exc,
+                        )
                 except Exception:
                     failed += 1
                     logger.exception("Makale {} zenginlestirilemedi", article_id)

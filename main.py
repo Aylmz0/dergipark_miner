@@ -92,11 +92,13 @@ async def run(skip_enrich: bool = False, limit: int = 0):
             logger.info("Dergi listesi: {} dergi bulundu, DB'ye kaydedildi", len(all_journals))
         except Exception:
             logger.exception("Dergi listesi cekilemedi")
-            if not discovered_journals:
-                all_journals = [{"short_name": "ihad", "name": ""}]
-                discovered_journals = ["ihad"]
-            else:
+            if discovered_journals:
+                logger.warning("Checkpoint'ten {} dergi kullanilacak", len(discovered_journals))
                 all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
+            else:
+                logger.error("Dergi listesi cekilemedi ve checkpoint'te veri yok, cikiliyor")
+                conn.close()
+                return
 
         # Checkpoint'te islenmis dergileri atla
         remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
@@ -133,9 +135,16 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
 
-            processed_shortnames.append(shortname)
-            if shortname in failed_journals:
-                del failed_journals[shortname]
+            if xml_pages:
+                # Basarili — islenmis listesine ekle
+                processed_shortnames.append(shortname)
+                if shortname in failed_journals:
+                    del failed_journals[shortname]
+            else:
+                # Basarisiz — failed listesine ekle, islenmis listesine EKLEME
+                if shortname not in failed_journals:
+                    failed_journals[shortname] = "no records returned"
+
             ckpt.update(
                 {
                     "processed_shortnames": processed_shortnames,
@@ -165,6 +174,12 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         for shortname in remaining_names:
             if shortname not in processed_shortnames and shortname not in failed_journals:
                 failed_journals[shortname] = "harvest incomplete"
+
+        # failed_journals limit (checkpoint boyutu sinirli tut)
+        if len(failed_journals) > 100:
+            sorted_keys = sorted(failed_journals.keys())
+            failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
+
         _save_ckpt(ckpt)
 
         # 4. PDF indirme
@@ -177,11 +192,14 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 """
             ).fetchall()
 
+            pdf_checkpoint_interval = 50
+            pdf_counter = 0
+
             # Once hata listesinden retry et
             pdf_errors = load_pdf_errors()
             for entry in pdf_errors[:]:
                 oai_id = entry.get("oai_id", "")
-                if is_permanently_failed(oai_id, max_retries=3):
+                if is_permanently_failed(oai_id, max_retries=5):
                     continue
                 row = conn.execute(
                     "SELECT a.id, j.short_name FROM articles a "
@@ -210,9 +228,19 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                     else:
                         log_pdf_error(oai_id, article_url, "PDF indirilemedi")
                         pdf_failed += 1
+                except httpx.HTTPStatusError as exc:
+                    is_transient = exc.response.status_code in (429, 500, 502, 503)
+                    log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
+                    pdf_failed += 1
                 except Exception as exc:
                     log_pdf_error(oai_id, article_url, str(exc))
                     pdf_failed += 1
+
+                pdf_counter += 1
+                if pdf_counter % pdf_checkpoint_interval == 0:
+                    ckpt["pdf_downloaded"] = pdf_downloaded
+                    ckpt["pdf_failed"] = pdf_failed
+                    _save_ckpt(ckpt)
 
             # Sonra normal indirme
             for _article_id, oai_id, journal in articles:
@@ -222,7 +250,7 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 pdf_path = Path("data/raw_pdfs") / safe_name
                 if pdf_path.exists():
                     continue
-                if is_permanently_failed(oai_id, max_retries=3):
+                if is_permanently_failed(oai_id, max_retries=5):
                     continue
 
                 article_url = (
@@ -241,9 +269,19 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                     else:
                         log_pdf_error(oai_id, article_url, "PDF indirilemedi")
                         pdf_failed += 1
+                except httpx.HTTPStatusError as exc:
+                    is_transient = exc.response.status_code in (429, 500, 502, 503)
+                    log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
+                    pdf_failed += 1
                 except Exception as exc:
                     log_pdf_error(oai_id, article_url, str(exc))
                     pdf_failed += 1
+
+                pdf_counter += 1
+                if pdf_counter % pdf_checkpoint_interval == 0:
+                    ckpt["pdf_downloaded"] = pdf_downloaded
+                    ckpt["pdf_failed"] = pdf_failed
+                    _save_ckpt(ckpt)
 
             ckpt["pdf_downloaded"] = pdf_downloaded
             ckpt["pdf_failed"] = pdf_failed

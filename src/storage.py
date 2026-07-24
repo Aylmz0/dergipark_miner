@@ -3,6 +3,7 @@
 Faz 4: SQLite şema tasarımı (journals, articles, authors, citations).
 """
 
+import hashlib
 import sqlite3
 from pathlib import Path
 
@@ -79,6 +80,10 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     if "enriched_at" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN enriched_at TEXT")
 
+    # content_hash kolonu eksik olabilir; ekle (dedup icin)
+    if "content_hash" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
+
     # Performans icin indexler
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
@@ -123,11 +128,17 @@ def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
     conn.commit()
 
 
+def _make_content_hash(title: str, journal_id: int, publication_date: str) -> str:
+    """DOI ve OAI ID yoksa dedup icin icerik hash'i olusturur."""
+    raw = f"{title}|{journal_id}|{publication_date}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
 def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     """GÖREV 5'in metadata dict'ini articles tablosuna yazar, article id'sini döndürür.
 
-    - journal_shortname -> journal_id çözülür (gerekirse journals'a eklenir).
-    - Oncelik: oai_identifier > doi > yeni satır.
+    - journal_shortname -> journal_id cozulur (gerekirse journals'a eklenir).
+    - Oncelik: oai_identifier > doi > content_hash > yeni satir.
     - oai_identifier veya doi varsa mevcut kaydi guncelle (UPSERT).
     - Yazarlari authors tablosuna yazar (UPSERT'te eskilerini siler).
     - Dönen değer articles.id (rowid).
@@ -173,14 +184,26 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                 (journal_id, title, publication_date, oai_identifier, article_id),
             )
 
-    # 3. Yeni satir
+    # 3. Content hash ile bul (DOI ve OAI ID yoksa)
+    if article_id is None and not oai_identifier and not doi and title:
+        content_hash = _make_content_hash(title, journal_id, publication_date)
+        existing = conn.execute(
+            "SELECT id FROM articles WHERE content_hash = ?", (content_hash,)
+        ).fetchone()
+        if existing:
+            article_id = existing[0]
+
+    # 4. Yeni satir
     if article_id is None:
+        content_hash = None
+        if not oai_identifier and not doi and title:
+            content_hash = _make_content_hash(title, journal_id, publication_date)
         cur = conn.execute(
             """
-            INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (journal_id, title, doi, publication_date, oai_identifier),
+            (journal_id, title, doi, publication_date, oai_identifier, content_hash),
         )
         article_id = cur.lastrowid
 
