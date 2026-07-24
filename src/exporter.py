@@ -1,6 +1,4 @@
-"""
-JSONL export — tek dosya, tum dergiler.
-"""
+"""JSONL export — single file, all journals."""
 
 from __future__ import annotations
 
@@ -44,10 +42,17 @@ def export_all_articles(
     conn: sqlite3.Connection,
     output_path: str | Path,
 ) -> Path:
-    """Tum makaleleri tek JSONL dosyasina aktarir.
+    """Export all articles to a single JSONL file.
 
-    Dergiler alfabetik sirali, her dergiye ait makaleler ardisik.
-    Her satir: {"slug": ..., "title": ..., "doi": ..., "date": ..., "authors": [...], "citations": [...]}
+    Articles are sorted by journal slug, then by ID. Each line contains:
+    {"slug": ..., "title": ..., "doi": ..., "date": ..., "authors": [...], "citations": [...]}
+
+    Args:
+        conn: SQLite connection (row_factory will be set to sqlite3.Row).
+        output_path: Destination file path.
+
+    Returns:
+        Path to the written JSONL file.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

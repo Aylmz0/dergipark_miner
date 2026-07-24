@@ -1,19 +1,13 @@
-"""
-Tests for src/exporter.py
-"""
+"""Tests for src/exporter.py."""
 
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from exporter import export_all_articles
-from storage import init_db
+from src.exporter import export_all_articles
+from src.storage import init_db
 
 
 def _seed_db(conn) -> None:

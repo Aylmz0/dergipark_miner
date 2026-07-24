@@ -1,7 +1,4 @@
-"""Ortak yardımcı fonksiyonlar (Telegram bot, retry, vb.).
-
-Faz 2-5 boyunca kullanılacak yardımcılar.
-"""
+"""Shared utility functions (retry, logging, checkpoint, adaptive delay)."""
 
 import asyncio
 import functools
@@ -21,12 +18,20 @@ def retry(
     rate_limit_backoff: float = 5.0,
     retry_on_status: tuple[int, ...] = (429, 500, 502, 503, 504),
 ):
-    """Hem senkron hem async fonksiyonlara takilabilen yeniden deneme dekoratoru.
+    """Decorator for retrying sync and async functions with exponential backoff.
 
-    Basarisiz denemeler arasinda ustel bekleme (backoff * 2**deneme) yapar.
-    HTTP 429 hatalarinda daha uzun bekleme kullanir.
-    4xx istemci hatalari (404, 400, 401, 403) yeniden denenmez; hemen firlatilir.
-    retry_on_status ile yeniden denenecek HTTP durum kodlari belirlenir.
+    HTTP 429 errors use longer backoff. Client errors (404, 400, 401, 403)
+    are raised immediately without retry.
+
+    Args:
+        max_attempts: Maximum number of attempts.
+        backoff: Base backoff in seconds (multiplied by 2^(attempt-1)).
+        exceptions: Tuple of exception types to catch and retry.
+        rate_limit_backoff: Backoff multiplier for 429 rate-limit errors.
+        retry_on_status: HTTP status codes that trigger retry.
+
+    Returns:
+        Decorator function.
     """
 
     def _get_status_code(exc: BaseException) -> int | None:
@@ -114,10 +119,10 @@ _logger_ready = False
 
 
 def setup_logger() -> None:
-    """loguru'yu yapılandırır: konsola INFO, hatalar data/error.log'a.
+    """Configure loguru: console INFO, rotating error.log for ERROR+.
 
-    LOGURU_LEVEL ortam değişkeni ile konsol seviyesi değiştirilebilir.
-    Birden fazla çağrıda tekrar handler eklenmez (guard).
+    Console level can be overridden with LOGURU_LEVEL env var.
+    Guard prevents duplicate handlers on multiple calls.
     """
     global _logger_ready
     if _logger_ready:
@@ -148,7 +153,12 @@ def setup_logger() -> None:
 
 
 def save_checkpoint(path: str | Path = "checkpoint.json", *, state: dict) -> None:
-    """Checkpoint dosyasina son islenen durumu yazar (atomik: .tmp + rename)."""
+    """Save checkpoint state atomically (tmp + rename).
+
+    Args:
+        path: Checkpoint file path.
+        state: Dict to serialize as JSON.
+    """
     path = Path(path)
     tmp = path.with_suffix(".tmp")
     import json
@@ -158,7 +168,14 @@ def save_checkpoint(path: str | Path = "checkpoint.json", *, state: dict) -> Non
 
 
 def load_checkpoint(path: str | Path = "checkpoint.json") -> dict:
-    """Checkpoint dosyasindan durumu okur. Dosya yoksa veya bozuksa {} dondurur."""
+    """Load checkpoint state from file. Returns {} if missing or corrupt.
+
+    Args:
+        path: Checkpoint file path.
+
+    Returns:
+        Deserialized checkpoint dict, or empty dict on error.
+    """
     path = Path(path)
     if not path.exists():
         return {}
@@ -176,6 +193,13 @@ class AdaptiveDelay:
 
     On 429: increase delay (multiply by backoff_factor).
     On success: decrease delay (multiply by decay_factor), clamped to min_delay.
+
+    Args:
+        default: Default delay in seconds.
+        min_delay: Minimum allowed delay.
+        max_delay: Maximum allowed delay.
+        backoff_factor: Multiplier applied on 429 errors.
+        decay_factor: Multiplier applied on successful requests.
     """
 
     def __init__(

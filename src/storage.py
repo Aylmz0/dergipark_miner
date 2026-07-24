@@ -1,7 +1,4 @@
-"""polars ve sqlite3 ile veri normalizasyonu ve kalıcı depolama.
-
-Faz 4: SQLite şema tasarımı (journals, articles, authors, citations).
-"""
+"""SQLite persistence layer for journals, articles, authors, and citations."""
 
 import hashlib
 import sqlite3
@@ -9,13 +6,24 @@ from pathlib import Path
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
-    """Veritabanı şemasını kurar ve bağlantıyı döndürür.
+    """Initialize the database schema and return a connection.
 
-    Tablolar IF NOT EXISTS ile oluşturulur; var olan tablolar atlanır.
-    İlişkiler: articles.journal_id -> journals.id,
-               authors.article_id -> articles.id,
-               citations.citing_article_id / cited_article_id -> articles.id.
-    Foreign key kısıtları etkinleştirilir (PRAGMA foreign_keys = ON).
+    Creates tables with IF NOT EXISTS. Runs migrations for missing columns.
+    Enables foreign key constraints (PRAGMA foreign_keys = ON).
+
+    Schema:
+        journals: id, short_name (UNIQUE), name, created_at
+        articles: id, journal_id (FK), title, doi, publication_date,
+                  oai_identifier, enriched_at, content_hash, created_at
+        authors: id, article_id (FK), name, created_at
+        citations: id, citing_article_id (FK), cited_article_id (FK),
+                   cited_openalex_id, cited_doi, cited_title, created_at
+
+    Args:
+        path: Path to the SQLite database file.
+
+    Returns:
+        Open sqlite3.Connection with foreign keys enabled.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,10 +103,18 @@ def init_db(path: str | Path) -> sqlite3.Connection:
 
 
 def _resolve_journal(conn: sqlite3.Connection, short_name: str, name: str = "") -> int:
-    """journal_shortname'i journals tablosunda cozer; yoksa ekler ve id dondurur.
+    """Resolve a journal short_name to its ID, inserting if needed.
 
-    - Yeni dergi eklerken name'i de yazar.
-    - Mevcut dergi bulundugunda name bossa ve gelen name doluysa gunceller.
+    If the journal exists but has an empty name and a new name is provided,
+    updates the name.
+
+    Args:
+        conn: SQLite connection.
+        short_name: Journal short name (slug).
+        name: Journal display name.
+
+    Returns:
+        The journal's row ID.
     """
     short_name = short_name or "__unknown__"
     row = conn.execute(
@@ -118,10 +134,13 @@ def _resolve_journal(conn: sqlite3.Connection, short_name: str, name: str = "") 
 
 
 def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
-    """Tum dergileri toplu olarak DB'ye yazar/gunceller.
+    """Bulk insert or update journals in the database.
 
-    Her dergi icin short_name + name bilgisini kaydeder.
-    Mevcut dergiler atlanir, name bossa guncellenir.
+    Existing journals are skipped. Empty names are filled if provided.
+
+    Args:
+        conn: SQLite connection.
+        journals: List of dicts with 'short_name' and 'name' keys.
     """
     for j in journals:
         _resolve_journal(conn, j.get("short_name", ""), j.get("name", ""))
@@ -129,19 +148,33 @@ def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
 
 
 def _make_content_hash(title: str, journal_id: int, publication_date: str) -> str:
-    """DOI ve OAI ID yoksa dedup icin icerik hash'i olusturur."""
+    """Generate a content hash for deduplication when DOI/OAI ID are absent.
+
+    Args:
+        title: Article title.
+        journal_id: Journal row ID.
+        publication_date: Publication date string.
+
+    Returns:
+        MD5 hex digest of the combined fields.
+    """
     raw = f"{title}|{journal_id}|{publication_date}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 def insert_article(conn: sqlite3.Connection, article: dict) -> int:
-    """GÖREV 5'in metadata dict'ini articles tablosuna yazar, article id'sini döndürür.
+    """Insert or update an article in the articles table.
 
-    - journal_shortname -> journal_id cozulur (gerekirse journals'a eklenir).
-    - Oncelik: oai_identifier > doi > content_hash > yeni satir.
-    - oai_identifier veya doi varsa mevcut kaydi guncelle (UPSERT).
-    - Yazarlari authors tablosuna yazar (UPSERT'te eskilerini siler).
-    - Dönen değer articles.id (rowid).
+    UPSERT priority: oai_identifier > doi > content_hash > new row.
+    Authors are written to the authors table (old rows deleted on update).
+
+    Args:
+        conn: SQLite connection.
+        article: Dict with keys: title, doi, authors, publication_date,
+                 journal_shortname, oai_identifier, journal_name.
+
+    Returns:
+        The article's row ID.
     """
     journal_id = _resolve_journal(
         conn, article.get("journal_shortname") or "", article.get("journal_name") or ""
@@ -213,7 +246,13 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
 
 
 def _write_authors(conn: sqlite3.Connection, article_id: int, authors: list) -> None:
-    """Makaleye ait yazarlari authors tablosuna yazar. UPSERT'te eski satirlari siler yeniden ekler."""
+    """Replace all authors for an article (delete-then-insert).
+
+    Args:
+        conn: SQLite connection.
+        article_id: Article row ID.
+        authors: List of author name strings.
+    """
     conn.execute("DELETE FROM authors WHERE article_id = ?", (article_id,))
     for name in authors:
         name = (name or "").strip()
@@ -233,12 +272,20 @@ def insert_citation(
     cited_doi: str | None = None,
     cited_title: str | None = None,
 ) -> int:
-    """Citations tablosuna atif yazar; ayni (citing, cited_openalex) tekrarlanmaz.
+    """Insert a citation row, deduplicating by (citing_article_id, cited_openalex_id).
 
-    - Ayni citing_article_id + cited_openalex_id kombinasyonu varsa atlar (dedup).
-    - cited_openalex_id None veya bos string ise dedup atlanmaz; teorik olarak ayni
-      makale birden fazla kez tanimlanabilir (farkli openalex id yoksa).
-    - Donus: inserted row id'si veya mevcut row id'si.
+    If cited_openalex_id is provided and a duplicate exists, returns the
+    existing row ID. Without cited_openalex_id, no dedup is performed.
+
+    Args:
+        conn: SQLite connection.
+        citing_article_id: ID of the citing article.
+        cited_openalex_id: OpenAlex work ID of the cited work.
+        cited_doi: DOI of the cited work.
+        cited_title: Title of the cited work.
+
+    Returns:
+        Row ID of the inserted or existing citation.
     """
     if citing_article_id is None:
         return -1
@@ -268,10 +315,16 @@ def insert_citation(
 
 
 def resolve_citation_targets(conn: sqlite3.Connection, *, cited_doi: str = "") -> int | None:
-    """Verilen DOI ile bizim articles tablomuzda eslesen makale id'sini dondurur.
+    """Find an article in our database matching the given DOI.
 
-    DOI'yi normalize eder: https://doi.org/ prefix'ini kaldirir.
-    Bulamazsa None dondurur.
+    Normalizes the DOI by removing https://doi.org/ prefix.
+
+    Args:
+        conn: SQLite connection.
+        cited_doi: DOI string to look up.
+
+    Returns:
+        Matching article row ID, or None if not found.
     """
     doi = (cited_doi or "").strip()
     if not doi:

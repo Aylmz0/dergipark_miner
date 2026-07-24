@@ -1,24 +1,18 @@
-"""opendataloader-pdf (hibrit docling) ile PDF işleme hattı.
-
-Faz 3 kapsamında implemente edilecek.
-"""
+"""PDF processing pipeline using opendataloader-pdf (Phase 3 stub)."""
 
 import opendataloader_pdf
 from loguru import logger
 
 
-def convert_pdf(pdf_path: str, *, hybrid: str = "docling-fast") -> dict:
-    """Verilen PDF dosyasını opendataloader_pdf ile işler.
+def convert_pdf(pdf_path: str, *, hybrid: str = "docling-fast") -> None:
+    """Process a PDF file using opendataloader_pdf.
 
     Args:
-        pdf_path: İşlenecek PDF dosyasının yolu.
-        hybrid: Hibritleme modu (varsayılan "docling-fast").
-
-    Returns:
-        convert() fonksiyonunun dönüş değeri (None; çıktı dosya olarak yazılır).
+        pdf_path: Path to the PDF file to process.
+        hybrid: Hybridization mode (default "docling-fast").
 
     Raises:
-        Herhangi bir hata loglanır ve yeniden fırlatılır.
+        Re-raises any exception after logging.
     """
     try:
         result = opendataloader_pdf.convert(input_path=pdf_path, hybrid=hybrid)

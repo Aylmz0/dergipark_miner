@@ -1,18 +1,13 @@
-"""crawler.py için birim testleri (httpx.MockTransport ile)."""
+"""Unit tests for crawler.py (httpx.MockTransport)."""
 
 import asyncio
-import sys
 import threading
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import httpx
 
-from crawler import (
+from src.crawler import (
     download_pdf,
     fetch_article_pdf_url,
-    fetch_journal_shortnames,
     fetch_journals,
     harvest_all_journals,
     is_permanently_failed,
@@ -56,9 +51,8 @@ def _mock_handler(request: httpx.Request) -> httpx.Response:
 
 def test_fetch_journal_shortnames_extracts_slug():
     transport = httpx.MockTransport(_mock_handler)
-    slugs: list[str] = asyncio.run(
-        _run(transport)
-    )
+    journals = asyncio.run(_run_journals(transport))
+    slugs = [j["short_name"] for j in journals]
 
     assert isinstance(slugs, list)
     assert "test-dergi" in slugs
@@ -68,7 +62,8 @@ def test_fetch_journal_shortnames_extracts_slug():
 
 async def _run(transport: httpx.MockTransport) -> list[str]:
     async with httpx.AsyncClient(transport=transport) as client:
-        return await fetch_journal_shortnames(client, max_pages=1)
+        journals = await fetch_journals(client, max_pages=1)
+        return [j["short_name"] for j in journals]
 
 
 async def _run_journals(transport: httpx.MockTransport) -> list[dict]:
@@ -122,7 +117,7 @@ def test_harvest_all_journals_returns_all_and_respects_concurrency():
         assert isinstance(pages, list)
         assert len(pages) == 1
         assert pages[0].count("<record>") == 2
-    # semaphore concurrency=2 ile sinirlandi, ayni anda en fazla 2 istek
+    # Semaphore with concurrency=2 limits to max 2 concurrent requests
     assert _conc["max"] <= 2
 
 
@@ -232,7 +227,7 @@ def test_parse_article_metadata_handles_missing_fields():
 
 
 def test_parse_article_metadata_prefers_en_title():
-    """Birden fazla dc:title varsa en-US olanı tercih et."""
+    """When multiple dc:title exist, prefer en-US language."""
     xml = """<?xml version="1.0"?>
     <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
       <ListRecords>
@@ -254,7 +249,7 @@ def test_parse_article_metadata_prefers_en_title():
 
 
 def test_parse_article_metadata_falls_back_to_source():
-    """dc:relation'da /pub/ yoksa dc:source'a bak."""
+    """When dc:relation has no /pub/, check dc:source."""
     xml = """<?xml version="1.0"?>
     <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
       <ListRecords>
@@ -275,7 +270,7 @@ def test_parse_article_metadata_falls_back_to_source():
 
 
 def test_parse_article_metadata_source_has_pub_slug():
-    """dc:relation'da yok ama dc:source içinde /pub/ varsa shortname bulunur."""
+    """When dc:relation is missing but dc:source contains /pub/, find shortname."""
     xml = """<?xml version="1.0"?>
     <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
       <ListRecords>
@@ -382,7 +377,7 @@ def test_download_pdf_handles_error(tmp_path):
 
 def test_log_pdf_error_and_load(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
@@ -394,7 +389,7 @@ def test_log_pdf_error_and_load(tmp_path, monkeypatch):
 
 def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
@@ -406,7 +401,7 @@ def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
 
 def test_is_permanently_failed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     assert is_permanently_failed("oai:test:1", max_retries=3) is False
@@ -419,7 +414,7 @@ def test_is_permanently_failed(tmp_path, monkeypatch):
 
 def test_remove_pdf_error(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/1.pdf", "err1")
@@ -433,21 +428,21 @@ def test_remove_pdf_error(tmp_path, monkeypatch):
 
 
 def test_log_pdf_error_transient_no_increment(tmp_path, monkeypatch):
-    """Gecici hatalarda retry_count artirilmaz."""
+    """Transient errors do not increment retry_count."""
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "429 Too Many", is_transient=True)
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "429 Too Many", is_transient=True)
     errors = load_pdf_errors()
-    assert errors[0]["retry_count"] == 0  # artmadi
+    assert errors[0]["retry_count"] == 0
 
 
 def test_log_pdf_error_permanent_increments(tmp_path, monkeypatch):
-    """Kalici hatalarda retry_count artar."""
+    """Permanent errors increment retry_count."""
     monkeypatch.chdir(tmp_path)
-    from crawler import PDF_ERRORS_PATH
+    from src.crawler import PDF_ERRORS_PATH
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")

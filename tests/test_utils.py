@@ -1,17 +1,14 @@
-"""utils.py için birim testleri (retry + setup_logger)."""
+"""Unit tests for utils.py (retry + setup_logger)."""
 
 import asyncio
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-import utils
-from utils import retry, setup_logger
+import src.utils as utils
+from src.utils import retry, setup_logger
 
 
 def test_retry_sync_success_after_failures():
-    """Senkron: ilk 2 deneme başarısız, 3. başarılı."""
+    """Sync: first 2 attempts fail, 3rd succeeds."""
     call_count = 0
 
     @retry(max_attempts=3, backoff=0.0)
@@ -27,7 +24,7 @@ def test_retry_sync_success_after_failures():
 
 
 def test_retry_sync_all_failures():
-    """Senkron: tüm denemeler başarısız → son hata fırlatılır."""
+    """Sync: all attempts fail -> last exception raised."""
     call_count = 0
 
     @retry(max_attempts=3, backoff=0.0)
@@ -46,7 +43,7 @@ def test_retry_sync_all_failures():
 
 
 def test_retry_async_success_after_failures():
-    """Asenkron: ilk 1 deneme başarısız, 2. başarılı."""
+    """Async: first attempt fails, 2nd succeeds."""
     call_count = 0
 
     @retry(max_attempts=3, backoff=0.0)
@@ -63,7 +60,7 @@ def test_retry_async_success_after_failures():
 
 
 def test_retry_async_all_failures():
-    """Asenkron: tüm denemeler başarısız → son hata fırlatılır."""
+    """Async: all attempts fail -> last exception raised."""
     call_count = 0
 
     @retry(max_attempts=2, backoff=0.0)
@@ -82,7 +79,7 @@ def test_retry_async_all_failures():
 
 
 def test_setup_logger_creates_error_log(tmp_path, monkeypatch):
-    """setup_logger çağrılınca data/error.log oluşmalı."""
+    """setup_logger should create data/error.log."""
     monkeypatch.chdir(tmp_path)
     utils._logger_ready = False
 
@@ -92,7 +89,7 @@ def test_setup_logger_creates_error_log(tmp_path, monkeypatch):
 
 
 def test_setup_logger_guard(tmp_path, monkeypatch):
-    """Ikinci cagirda tekrar handler eklenmemeli (guard)."""
+    """Second call should not add duplicate handlers (guard)."""
     monkeypatch.chdir(tmp_path)
     utils._logger_ready = False
 
@@ -103,7 +100,7 @@ def test_setup_logger_guard(tmp_path, monkeypatch):
 
 
 def test_retry_429_uses_longer_backoff():
-    """429 iceren hatalarda rate_limit_backoff kullanilir."""
+    """429 errors use rate_limit_backoff instead of normal backoff."""
     call_count = 0
 
     class RateLimitError(Exception):
@@ -123,7 +120,7 @@ def test_retry_429_uses_longer_backoff():
 
 
 def test_retry_404_raises_immediately():
-    """404 hatasi hemen firlatilir, deneme yapilmaz."""
+    """404 errors are raised immediately without retry."""
     call_count = 0
 
     class NotFoundError(Exception):
@@ -147,7 +144,7 @@ def test_retry_404_raises_immediately():
 
 
 def test_retry_500_retries():
-    """500 hatasi yeniden denenir."""
+    """500 errors are retried."""
     call_count = 0
 
     class ServerError(Exception):
@@ -171,7 +168,7 @@ def test_retry_500_retries():
 
 
 def test_checkpoint_roundtrip(tmp_path):
-    """save_checkpoint -> load_checkpoint ayni dict'i dondurur."""
+    """save_checkpoint -> load_checkpoint returns same dict."""
     path = tmp_path / "cp.json"
     state = {"last_journal_index": 12, "processed_articles": 340}
     utils.save_checkpoint(path, state=state)
@@ -180,13 +177,13 @@ def test_checkpoint_roundtrip(tmp_path):
 
 
 def test_checkpoint_load_missing_file():
-    """Dosya yoksa {} dondurur."""
+    """Missing file returns {}."""
     result = utils.load_checkpoint("/nonexistent/path/cp.json")
     assert result == {}
 
 
 def test_checkpoint_load_corrupt_file(tmp_path):
-    """Bozuk JSON dosyasi {} dondurur."""
+    """Corrupt JSON returns {}."""
     path = tmp_path / "corrupt.json"
     path.write_text("{invalid json!!!", encoding="utf-8")
     result = utils.load_checkpoint(path)
@@ -194,13 +191,13 @@ def test_checkpoint_load_corrupt_file(tmp_path):
 
 
 def test_adaptive_delay_default():
-    """Varsayilan deger default ile baslar."""
+    """Default delay starts at default value."""
     d = utils.AdaptiveDelay(default=2.0)
     assert d.get("j1") == 2.0
 
 
 def test_adaptive_delay_on_429_increases():
-    """429'da gecikme artar."""
+    """Delay increases on 429."""
     d = utils.AdaptiveDelay(default=2.0, backoff_factor=2.0)
     new_delay = d.on_429("j1")
     assert new_delay == 4.0
@@ -208,7 +205,7 @@ def test_adaptive_delay_on_429_increases():
 
 
 def test_adaptive_delay_on_success_decays():
-    """Basarida gecikme azalir."""
+    """Delay decreases on success."""
     d = utils.AdaptiveDelay(default=2.0, decay_factor=0.5)
     d.on_429("j1")  # 2.0 -> 4.0
     new_delay = d.on_success("j1")  # 4.0 -> 2.0
@@ -216,7 +213,7 @@ def test_adaptive_delay_on_success_decays():
 
 
 def test_adaptive_delay_respects_min_max():
-    """Min/max sinirlarini asmaz."""
+    """Respects min/max bounds."""
     d = utils.AdaptiveDelay(default=2.0, min_delay=0.5, max_delay=10.0, backoff_factor=3.0)
     d.on_429("j1")  # 2.0 -> 6.0
     d.on_429("j1")  # 6.0 -> 10.0 (max)
@@ -230,7 +227,7 @@ def test_adaptive_delay_respects_min_max():
 
 
 def test_adaptive_delay_to_dict_from_dict():
-    """to_dict/from_dict serilestirme."""
+    """to_dict/from_dict serialization roundtrip."""
     d = utils.AdaptiveDelay(default=2.0)
     d.on_429("j1")
     d.on_429("j2")

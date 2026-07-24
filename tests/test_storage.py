@@ -1,13 +1,8 @@
-"""storage.py için birim testleri (geçici SQLite ile)."""
-
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+"""Unit tests for storage.py (in-memory SQLite)."""
 
 import pytest
 
-from storage import init_db, insert_article, insert_journals
+from src.storage import init_db, insert_article, insert_journals
 
 
 @pytest.fixture
@@ -66,7 +61,7 @@ def test_insert_article_upsert_by_doi(conn):
 
 
 def test_insert_article_upsert_by_oai_identifier(conn):
-    """DOI'siz makalede oai_identifier'a göre duplicate önleme."""
+    """Duplicate prevention by oai_identifier when DOI is absent."""
     base = {
         "title": "Eski Baslik",
         "doi": "",
@@ -92,7 +87,7 @@ def test_insert_article_upsert_by_oai_identifier(conn):
 
 
 def test_insert_article_writes_authors(conn):
-    """insert_article authors tablosuna yazar."""
+    """insert_article writes authors to authors table."""
     article = {
         "title": "Yazarli Makale",
         "doi": "",
@@ -112,7 +107,7 @@ def test_insert_article_writes_authors(conn):
 
 
 def test_insert_article_upsert_replaces_authors(conn):
-    """UPSERT'te eski yazarlar silinip yenisi eklenir."""
+    """UPSERT deletes old authors and inserts new ones."""
     article = {
         "title": "Makale",
         "doi": "",
@@ -136,7 +131,7 @@ def test_insert_article_upsert_replaces_authors(conn):
 
 
 def test_insert_article_writes_journal_name(conn):
-    """insert_article journals.name kolonuna dergi adini yazar."""
+    """insert_article writes journal name to journals.name column."""
     article = {
         "title": "Test Makale",
         "doi": "",
@@ -155,7 +150,7 @@ def test_insert_article_writes_journal_name(conn):
 
 
 def test_insert_article_enriches_existing_journal_name(conn):
-    """Mevcut derginin name'i bossa, gelen name ile zenginlestirilir."""
+    """When existing journal name is empty, fills it from new data."""
     conn.execute("INSERT INTO journals (short_name, name) VALUES ('j1', '')")
     conn.commit()
 

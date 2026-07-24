@@ -1,8 +1,10 @@
-"""OpenAlex uzerinden makale zenginlestirme: referans/atif listesi cekme."""
+"""OpenAlex API integration for article enrichment (citations, DOI resolution)."""
 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from collections.abc import Callable
 
 import httpx
 from loguru import logger
@@ -18,11 +20,18 @@ OPENALEX_MAIL = "dergipark-miner@example.com"
 async def fetch_openalex_work(
     client: httpx.AsyncClient, *, doi: str = "", title: str = ""
 ) -> dict | None:
-    """OpenAlex'den bir work JSON'u ceker.
+    """Fetch a work from OpenAlex by DOI or title search.
 
-    Once DOI ile arar (dogrudan /works/https://doi.org/{doi}),
-    DOI yoksa title ile /works?search={title}.
-    Bulamazsa None dondurur.
+    Uses direct /works/https://doi.org/{doi} for DOI lookup,
+    falls back to /works?search={title} for title search.
+
+    Args:
+        client: Async HTTP client.
+        doi: DOI string (without https://doi.org/ prefix).
+        title: Title search query.
+
+    Returns:
+        Work dict from OpenAlex, or None if not found.
     """
     headers = {"User-Agent": DEFAULT_USER_AGENT, "Accept": "application/json"}
     params: dict[str, str] = {"mailto": OPENALEX_MAIL}
@@ -49,9 +58,14 @@ async def fetch_openalex_work(
 
 @retry(max_attempts=3, backoff=1.0)
 async def fetch_openalex_work_by_id(client: httpx.AsyncClient, work_id: str) -> dict | None:
-    """OpenAlex'den bir work id'si (Wxxxx) ile doi ve title bilgisini ceker.
+    """Fetch DOI and title from OpenAlex by work ID (Wxxxx).
 
-    Donus: {"doi": "...", "title": "..."} veya None.
+    Args:
+        client: Async HTTP client.
+        work_id: OpenAlex work ID (e.g. 'W1234567890').
+
+    Returns:
+        Dict with 'doi' and 'title' keys, or None if not found.
     """
     url = f"{OPENALEX_BASE}/works/{work_id}"
     params = {"mailto": OPENALEX_MAIL}
@@ -71,13 +85,21 @@ async def enrich_article_citations(
     client: httpx.AsyncClient,
     article_id: int,
     article: dict,
-    conn,
+    conn: sqlite3.Connection,
 ) -> int:
-    """Bir makalenin referans listesini OpenAlex'den cekip citations tablosuna yazar.
+    """Fetch citation list for one article from OpenAlex and write to DB.
 
-    article dict'inden doi veya title ile OpenAlex'de work arar.
-    Bulursa referenced_works listesindeki her makale icin insert_citation cagirir.
-    Kac referans yazildiysa dondurur.
+    Looks up the article by DOI or title in OpenAlex, then inserts
+    each referenced_work as a citation row.
+
+    Args:
+        client: Async HTTP client.
+        article_id: Article row ID in our database.
+        article: Dict with 'doi' and/or 'title' keys.
+        conn: SQLite connection.
+
+    Returns:
+        Number of citations written.
     """
     doi = article.get("doi") or ""
     title = article.get("title") or ""
@@ -112,20 +134,27 @@ async def enrich_article_citations(
 
 async def enrich_all_articles(
     client: httpx.AsyncClient,
-    conn,
+    conn: sqlite3.Connection,
     *,
     concurrency: int = 3,
     batch_size: int = 50,
     max_total: int = 0,
-    on_batch_done=None,
+    on_batch_done: Callable[[int, int, int], None] | None = None,
 ) -> dict:
-    """Tum makaleleri OpenAlex uzerinden zenginlestirir (referans/atif cekme).
+    """Enrich all unprocessed articles with citations from OpenAlex.
 
-    articles tablosundan (id, doi, title) WHERE enriched_at IS NULL ceker.
-    while loop ile tum makaleler islenene kadar devam eder.
-    on_batch_done(enriched, citations_added, failed) callback ile checkpoint saglanir.
-    max_total > 0 ise o kadar makale islenir ve durur.
-    Donus: {enriched: N, citations_added: M, failed: K}
+    Processes articles where enriched_at IS NULL in batches.
+
+    Args:
+        client: Async HTTP client.
+        conn: SQLite connection.
+        concurrency: Max concurrent OpenAlex requests.
+        batch_size: Articles per batch.
+        max_total: Stop after processing this many articles (0=unlimited).
+        on_batch_done: Callback with (enriched, citations_added, failed).
+
+    Returns:
+        Dict with enriched, citations_added, failed counts.
     """
     sem = asyncio.Semaphore(concurrency)
     total_enriched = 0
@@ -212,18 +241,27 @@ async def enrich_all_articles(
 
 async def enrich_existing_citations(
     client: httpx.AsyncClient,
-    conn,
+    conn: sqlite3.Connection,
     *,
     concurrency: int = 3,
     batch_size: int = 100,
     max_total: int = 0,
-    on_batch_done=None,
+    on_batch_done: Callable[[int, int, int], None] | None = None,
 ) -> dict:
-    """Mevcut citations satirlarini OpenAlex ile zenginlestirir (DOI/title cozme).
+    """Enrich existing citation rows with DOI and title from OpenAlex.
 
-    cited_openalex_id dolu ama cited_doi BOŞ olan citation'lari ceker.
-    while loop ile tum citation'lar islenene kadar devam eder.
-    Donus: {enriched: N, linked_to_our_db: K, failed: M}
+    Processes citations where cited_openalex_id is set but cited_doi is empty.
+
+    Args:
+        client: Async HTTP client.
+        conn: SQLite connection.
+        concurrency: Max concurrent OpenAlex requests.
+        batch_size: Citations per batch.
+        max_total: Stop after processing this many (0=unlimited).
+        on_batch_done: Callback with (enriched, linked, failed).
+
+    Returns:
+        Dict with enriched, linked_to_our_db, failed counts.
     """
     sem = asyncio.Semaphore(concurrency)
     total_enriched = 0

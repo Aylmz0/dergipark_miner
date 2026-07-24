@@ -1,28 +1,24 @@
-"""dergipark-miner ana orkestrasyon dosyasi.
+"""Dergipark-miner main orchestrator.
 
-Dergi listesini kesfet -> OAI ham XML cek -> parse et -> SQLite'a yaz ->
-PDF indir -> OpenAlex ile zenginlestir -> JSONL export.
+Pipeline: discover journals -> OAI-PMH harvest -> parse -> SQLite ->
+PDF download -> OpenAlex enrichment -> JSONL export.
 
-Checkpoint ile kaldigi yerden devam eder.
+Resumes from checkpoint.
 
-Kullanim:
-    python main.py                          # tum pipeline
-    python main.py --skip-enrich            # OpenAlex zenginlestirmesini atla
-    python main.py --limit 50               # dergi basi max 50 makale
-    python main.py --limit 0                # sinirsiz makale
+Usage:
+    python main.py                  # full pipeline
+    python main.py --skip-enrich    # skip OpenAlex enrichment
+    python main.py --limit 50       # max 50 articles per journal
+    python main.py --limit 0        # unlimited articles
 """
 
 import argparse
-import sys
 from pathlib import Path
 
-_root = Path(__file__).resolve().parent
-sys.path.insert(0, str(_root))
+import httpx
+from loguru import logger
 
-import httpx  # noqa: E402
-from loguru import logger  # noqa: E402
-
-from src.crawler import (  # noqa: E402
+from src.crawler import (
     DEFAULT_USER_AGENT,
     download_pdf,
     fetch_article_pdf_url,
@@ -34,25 +30,26 @@ from src.crawler import (  # noqa: E402
     parse_article_metadata,
     remove_pdf_error,
 )
-from src.enrich import enrich_all_articles, enrich_existing_citations  # noqa: E402
-from src.exporter import export_all_articles  # noqa: E402
-from src.storage import init_db, insert_article, insert_journals  # noqa: E402
-from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger  # noqa: E402
+from src.enrich import enrich_all_articles, enrich_existing_citations
+from src.exporter import export_all_articles
+from src.storage import init_db, insert_article, insert_journals
+from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger
 
 CHECKPOINT_PATH = Path("checkpoint.json")
 
 
 def _save_ckpt(ckpt: dict) -> None:
-    """Checkpoint'i guvenli sekilde kaydeder."""
+    """Save checkpoint safely (atomic write)."""
     try:
         save_checkpoint(CHECKPOINT_PATH, state=ckpt)
     except Exception:
         logger.warning("Checkpoint yazilamadi")
 
 
-async def run(skip_enrich: bool = False, limit: int = 0):
+async def run(skip_enrich: bool = False, limit: int = 0) -> None:
+    """Run the full mining pipeline."""
     setup_logger()
-    logger.info("=== dergipark-miner baslatildi ===")
+    logger.info("=== dergipark-miner started ===")
 
     # Checkpoint yukle
     ckpt = load_checkpoint(CHECKPOINT_PATH)
@@ -66,45 +63,45 @@ async def run(skip_enrich: bool = False, limit: int = 0):
 
     if processed_shortnames:
         logger.info(
-            "Checkpoint yuklendi: {} dergi kesfedildi, {} islenmis, {} makale",
+            "Checkpoint loaded: {} journals discovered, {} processed, {} articles",
             len(discovered_journals),
             len(processed_shortnames),
             processed_articles,
         )
 
-    # 1. Veritabani
+    # 1. Database
     db_path = Path("data/Sobiad_Mining.sqlite")
     conn = init_db(db_path)
-    logger.info("Veritaban hazir: {}", db_path)
+    logger.info("Database ready: {}", db_path)
 
     async with httpx.AsyncClient(
         follow_redirects=True,
         headers={"User-Agent": DEFAULT_USER_AGENT},
         timeout=httpx.Timeout(60.0),
     ) as client:
-        # 2. Dergi listesini kesfet (otomatik pagination)
+        # 2. Discover journals (auto-pagination)
         try:
             all_journals = await fetch_journals(client)
             discovered_journals = [j["short_name"] for j in all_journals]
             insert_journals(conn, all_journals)
             ckpt["discovered_journals"] = discovered_journals
             _save_ckpt(ckpt)
-            logger.info("Dergi listesi: {} dergi bulundu, DB'ye kaydedildi", len(all_journals))
+            logger.info("Journal list: {} journals found, saved to DB", len(all_journals))
         except Exception:
-            logger.exception("Dergi listesi cekilemedi")
+            logger.exception("Failed to fetch journal list")
             if discovered_journals:
-                logger.warning("Checkpoint'ten {} dergi kullanilacak", len(discovered_journals))
+                logger.warning("Using {} journals from checkpoint", len(discovered_journals))
                 all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
             else:
-                logger.error("Dergi listesi cekilemedi ve checkpoint'te veri yok, cikiliyor")
+                logger.error("Failed to fetch journals and no checkpoint data, exiting")
                 conn.close()
                 return
 
-        # Checkpoint'te islenmis dergileri atla
+        # Skip already-processed journals from checkpoint
         remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
         if processed_shortnames:
             logger.info(
-                "Checkpoint: {} dergi atlanacak, {} dergi islenecek",
+                "Checkpoint: {} journals to skip, {} journals to process",
                 len(processed_shortnames),
                 len(remaining),
             )
@@ -120,12 +117,12 @@ async def run(skip_enrich: bool = False, limit: int = 0):
         if ckpt.get("adaptive_delays"):
             adaptive_delay = AdaptiveDelay.from_dict(ckpt["adaptive_delays"])
 
-        # 3. OAI ham XML cek + parse + insert (streaming)
+        # 3. OAI-PMH harvest + parse + insert (streaming)
         remaining_names = [j["short_name"] for j in remaining]
         max_per_journal = limit if limit > 0 else 999999
 
-        def on_journal_done(shortname: str, xml_pages: list[str]):
-            """Her dergi bitince cagrilir: XML'leri parse edip DB'ye yazar."""
+        def on_journal_done(shortname: str, xml_pages: list[str]) -> None:
+            """Called when each journal harvest completes: parse XML and write to DB."""
             nonlocal processed_articles
             for xml_text in xml_pages:
                 try:
@@ -136,12 +133,12 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
 
             if xml_pages:
-                # Basarili — islenmis listesine ekle
+                # Success — add to processed list
                 processed_shortnames.append(shortname)
                 if shortname in failed_journals:
                     del failed_journals[shortname]
             else:
-                # Basarisiz — failed listesine ekle, islenmis listesine EKLEME
+                # Failed — add to failed list, do NOT add to processed
                 if shortname not in failed_journals:
                     failed_journals[shortname] = "no records returned"
 
@@ -166,16 +163,16 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 adaptive_delay=adaptive_delay,
                 on_journal_done=on_journal_done,
             )
-            logger.info("Harvest tamamlandi: {} makale toplam", processed_articles)
+            logger.info("Harvest done: {} articles total", processed_articles)
         except Exception:
-            logger.exception("Harvest basarisiz")
+            logger.exception("Harvest failed")
 
-        # Basarisiz dergileri isaret
+        # Mark remaining journals as incomplete
         for shortname in remaining_names:
             if shortname not in processed_shortnames and shortname not in failed_journals:
                 failed_journals[shortname] = "harvest incomplete"
 
-        # failed_journals limit (checkpoint boyutu sinirli tut)
+        # Trim failed_journals (keep checkpoint size small)
         if len(failed_journals) > 100:
             sorted_keys = sorted(failed_journals.keys())
             failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
@@ -195,7 +192,34 @@ async def run(skip_enrich: bool = False, limit: int = 0):
             pdf_checkpoint_interval = 50
             pdf_counter = 0
 
-            # Once hata listesinden retry et
+            async def _download_one(
+                oai_id: str, journal: str, pdf_path: Path
+            ) -> tuple[bool, bool]:
+                """Download a single PDF. Returns (downloaded, failed)."""
+                article_url = (
+                    f"https://dergipark.org.tr/tr/pub/{journal}/article/"
+                    f"{oai_id.split('/')[-1]}"
+                )
+                try:
+                    pdf_url = await fetch_article_pdf_url(client, article_url)
+                    if not pdf_url:
+                        log_pdf_error(oai_id, article_url, "PDF link not found")
+                        return False, True
+                    ok = await download_pdf(client, pdf_url, pdf_path)
+                    if ok:
+                        remove_pdf_error(oai_id)
+                        return True, False
+                    log_pdf_error(oai_id, article_url, "PDF download failed")
+                    return False, True
+                except httpx.HTTPStatusError as exc:
+                    is_transient = exc.response.status_code in (429, 500, 502, 503)
+                    log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
+                    return False, True
+                except Exception as exc:
+                    log_pdf_error(oai_id, article_url, str(exc))
+                    return False, True
+
+            # Retry previously failed PDFs first
             pdf_errors = load_pdf_errors()
             for entry in pdf_errors[:]:
                 oai_id = entry.get("oai_id", "")
@@ -210,39 +234,18 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 if not row:
                     continue
                 _, journal = row
-                article_url = (
-                    f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
-                )
-                try:
-                    pdf_url = await fetch_article_pdf_url(client, article_url)
-                    if not pdf_url:
-                        log_pdf_error(oai_id, article_url, "PDF link bulunamadi")
-                        pdf_failed += 1
-                        continue
-                    safe_name = oai_id.replace("/", "_") + ".pdf"
-                    pdf_path = Path("data/raw_pdfs") / safe_name
-                    ok = await download_pdf(client, pdf_url, pdf_path)
-                    if ok:
-                        remove_pdf_error(oai_id)
-                        pdf_downloaded += 1
-                    else:
-                        log_pdf_error(oai_id, article_url, "PDF indirilemedi")
-                        pdf_failed += 1
-                except httpx.HTTPStatusError as exc:
-                    is_transient = exc.response.status_code in (429, 500, 502, 503)
-                    log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
-                    pdf_failed += 1
-                except Exception as exc:
-                    log_pdf_error(oai_id, article_url, str(exc))
-                    pdf_failed += 1
-
+                safe_name = oai_id.replace("/", "_") + ".pdf"
+                pdf_path = Path("data/raw_pdfs") / safe_name
+                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
+                pdf_downloaded += downloaded
+                pdf_failed += failed
                 pdf_counter += 1
                 if pdf_counter % pdf_checkpoint_interval == 0:
                     ckpt["pdf_downloaded"] = pdf_downloaded
                     ckpt["pdf_failed"] = pdf_failed
                     _save_ckpt(ckpt)
 
-            # Sonra normal indirme
+            # Then normal download
             for _article_id, oai_id, journal in articles:
                 if not oai_id:
                     continue
@@ -252,31 +255,9 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                     continue
                 if is_permanently_failed(oai_id, max_retries=5):
                     continue
-
-                article_url = (
-                    f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
-                )
-                try:
-                    pdf_url = await fetch_article_pdf_url(client, article_url)
-                    if not pdf_url:
-                        log_pdf_error(oai_id, article_url, "PDF link bulunamadi")
-                        pdf_failed += 1
-                        continue
-                    ok = await download_pdf(client, pdf_url, pdf_path)
-                    if ok:
-                        remove_pdf_error(oai_id)
-                        pdf_downloaded += 1
-                    else:
-                        log_pdf_error(oai_id, article_url, "PDF indirilemedi")
-                        pdf_failed += 1
-                except httpx.HTTPStatusError as exc:
-                    is_transient = exc.response.status_code in (429, 500, 502, 503)
-                    log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
-                    pdf_failed += 1
-                except Exception as exc:
-                    log_pdf_error(oai_id, article_url, str(exc))
-                    pdf_failed += 1
-
+                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
+                pdf_downloaded += downloaded
+                pdf_failed += failed
                 pdf_counter += 1
                 if pdf_counter % pdf_checkpoint_interval == 0:
                     ckpt["pdf_downloaded"] = pdf_downloaded
@@ -286,13 +267,13 @@ async def run(skip_enrich: bool = False, limit: int = 0):
             ckpt["pdf_downloaded"] = pdf_downloaded
             ckpt["pdf_failed"] = pdf_failed
             _save_ckpt(ckpt)
-            logger.info("PDF indirme: {} basarili, {} basarisiz", pdf_downloaded, pdf_failed)
+            logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
         except Exception:
-            logger.exception("PDF indirme hatasi")
+            logger.exception("PDF download error")
 
         # 5. OpenAlex zenginlestirme
         if skip_enrich:
-            logger.info("OpenAlex zenginlestirme atlandi (--skip-enrich)")
+            logger.info("OpenAlex enrichment skipped (--skip-enrich)")
         else:
 
             def on_enrich_batch(done, citations, failed):
@@ -310,43 +291,43 @@ async def run(skip_enrich: bool = False, limit: int = 0):
                 ckpt["enriched_count"] = result["enriched"]
                 _save_ckpt(ckpt)
                 logger.info(
-                    "Zenginlestirme: enriched={}, citations={}, failed={}",
+                    "Enrichment done: enriched={}, citations={}, failed={}",
                     result["enriched"],
                     result["citations_added"],
                     result["failed"],
                 )
             except Exception:
-                logger.exception("Zenginlestirme hatasi")
+                logger.exception("Enrichment error")
 
-            # 6. Citation DOI/baglanti zenginlestirme
-            try:
-                result2 = await enrich_existing_citations(
-                    client,
-                    conn,
-                    concurrency=3,
-                    batch_size=100,
-                )
-                logger.info(
-                    "Citation zenginlestirme: enriched={}, linked={}, failed={}",
-                    result2["enriched"],
-                    result2["linked_to_our_db"],
-                    result2["failed"],
-                )
-            except Exception:
-                logger.exception("Citation zenginlestirme hatasi")
+        # 6. Citation DOI resolution
+        try:
+            result2 = await enrich_existing_citations(
+                client,
+                conn,
+                concurrency=3,
+                batch_size=100,
+            )
+            logger.info(
+                "Citation enrichment done: enriched={}, linked={}, failed={}",
+                result2["enriched"],
+                result2["linked_to_our_db"],
+                result2["failed"],
+            )
+        except Exception:
+            logger.exception("Citation enrichment error")
 
     # 7. Export
     try:
         export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-        logger.info("Export tamamlandi: data/exports/all_articles.jsonl")
+        logger.info("Export done: data/exports/all_articles.jsonl")
     except Exception:
-        logger.exception("Export hatasi")
+        logger.exception("Export error")
 
-    # Son checkpoint
+    # Final checkpoint
     _save_ckpt(ckpt)
 
     conn.close()
-    logger.info("=== dergipark-miner bitti ===")
+    logger.info("=== dergipark-miner finished ===")
 
 
 if __name__ == "__main__":
@@ -354,9 +335,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="dergipark-miner: academic data mining tool")
     parser.add_argument(
-        "--skip-enrich", action="store_true", help="OpenAlex zenginlestirmesini atla"
+        "--skip-enrich", action="store_true", help="Skip OpenAlex enrichment"
     )
-    parser.add_argument("--limit", type=int, default=0, help="Dergi basi max makale (0=sinirsiz)")
+    parser.add_argument("--limit", type=int, default=0, help="Max articles per journal (0=unlimited)")
     args = parser.parse_args()
 
     asyncio.run(run(skip_enrich=args.skip_enrich, limit=args.limit))

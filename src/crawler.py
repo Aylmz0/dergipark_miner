@@ -1,16 +1,17 @@
-"""DergiPark veri madenciligi icin sabitler, dergi kesif ve PDF indirme fonksiyonlari."""
+"""Constants, journal discovery, and PDF download functions for DergiPark data mining."""
 
 import asyncio
 import json
 import random
 import re
-from datetime import UTC
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
 from selectolax.parser import HTMLParser
 
-from src.utils import logger, retry, setup_logger
+from src.utils import AdaptiveDelay, logger, retry, setup_logger
 
 # DergiPark OAI-PMH taban URL'i (canli testle 2026-07 teyit edildi, 200 + <OAI-PMH>).
 # OAI-PMH dergi bazlidir; tekil dergi URL'i f"{DERGIPARK_OAI_BASE}/{dergi_kisa_adi}"
@@ -34,11 +35,16 @@ DEFAULT_USER_AGENT = "dergipark-miner/0.1 (https://github.com/example/dergipark_
 
 
 def _extract_journals(html: str) -> list[dict]:
-    """HTML icindeki dergi linklerinden slug + full name cikarir.
+    """Extract journal slug and name from DergiPark listing page HTML.
 
-    DergiPark listeleme sayfasindaki dergi linkleri <h5> icindedir:
-        <h5><a href="/tr/pub/{slug}">Full Dergi Adi</a></h5>
-    Navigasyon linkleri (navbar, dropdown) filtrelenir.
+    Parses <h5><a href="/tr/pub/{slug}">Name</a></h5> elements,
+    filtering out navigation links.
+
+    Args:
+        html: Raw HTML of a DergiPark journals listing page.
+
+    Returns:
+        List of dicts with 'short_name' and 'name' keys, sorted by slug.
     """
     tree = HTMLParser(html)
     journals: dict[str, str] = {}
@@ -58,13 +64,16 @@ def _extract_journals(html: str) -> list[dict]:
 
 @retry(max_attempts=3, backoff=1.0)
 async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) -> list[dict]:
-    """DergiPark dergi kesif sayfasini asenkron gezip dergi bilgilerini toplar.
+    """Discover all journals from DergiPark listing pages via async pagination.
 
-    While dongusu ile sayfalar bitene kadar devam eder:
-    - Sayfa 0 dergi dondururse durur
-    - Tum dergiler zaten toplanmissa (out-of-bounds redirect) durur
-    - max_pages hard limit olarak korunur
-    Donus: [{short_name: "ihad", name: "Islam Hukuku..."}, ...]
+    Stops when: page returns 0 journals, no new journals found, or max_pages reached.
+
+    Args:
+        client: Async HTTP client.
+        max_pages: Maximum number of pages to scan (safety limit).
+
+    Returns:
+        List of dicts with 'short_name' and 'name' keys, sorted alphabetically.
     """
     setup_logger()
 
@@ -102,18 +111,17 @@ async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) ->
     return [{"short_name": s, "name": n} for s, n in sorted(collected.items())]
 
 
-# backward compat alias
-async def fetch_journal_shortnames(
-    client: httpx.AsyncClient, *, max_pages: int = 1000
-) -> list[str]:
-    """fetch_journals'un eski arayuzu — sadece short_name listesi dondurur."""
-    journals = await fetch_journals(client, max_pages=max_pages)
-    return [j["short_name"] for j in journals]
-
-
 @retry(max_attempts=3, backoff=1.0)
 async def _fetch_oai(client: httpx.AsyncClient, url: str) -> str:
-    """Tek bir OAI HTTP GET istegini retry ile çeker, ham XML gövdesini döndürür."""
+    """Fetch a single OAI-PMH endpoint and return raw XML body.
+
+    Args:
+        client: Async HTTP client.
+        url: Full OAI-PMH request URL.
+
+    Returns:
+        Raw XML response body as string.
+    """
     resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
     resp.raise_for_status()
     return resp.text
@@ -126,20 +134,25 @@ async def harvest_all_journals(
     concurrency: int = 1,
     max_records_per_journal: int = 20,
     inter_request_delay: float = 1.5,
-    adaptive_delay=None,
-    on_journal_done=None,
+    adaptive_delay: AdaptiveDelay | None = None,
+    on_journal_done: Callable[[str, list[str]], None] | None = None,
 ) -> dict[str, list[str]] | None:
-    """Dergi listesindeki her dergi icin OAI ListRecords ham XML'lerini asenkron toplar.
+    """Harvest OAI-PMH ListRecords XML for all journals concurrently.
 
-    on_journal_done callable verilirse: streaming mod — her dergi bitince
-    on_journal_done(shortname, xml_pages) cagrilir, XML'ler RAM'de tutulmaz.
-    Verilmezse: eski mod — {shortname: [xml_pages]} dondurur.
+    Streaming mode: if on_journal_done callback is provided, XML pages are
+    passed to the callback immediately and not held in memory.
 
-    - asyncio.Semaphore ile eszamanlilik sinirlanir.
-    - Dergi istegi utils.retry ile sarilir; kalici hatada o dergi [] ile atlanir (crash yok).
-    - inter_request_delay: istekler arasi bekleme (saniye); +/- %30 rastgelelik.
-    - adaptive_delay: AdaptiveDelay nesnesi; 429'da gecikme artar, basarida azalir.
-    - client disaridan alinir; fonksiyon icinde client uretmez.
+    Args:
+        client: Async HTTP client.
+        shortnames: List of journal short names to harvest.
+        concurrency: Max concurrent requests (semaphore limit).
+        max_records_per_journal: Max records to fetch per journal.
+        inter_request_delay: Base delay between requests in seconds (+/- 30% jitter).
+        adaptive_delay: AdaptiveDelay instance for 429 backoff.
+        on_journal_done: Callback invoked as on_journal_done(shortname, xml_pages).
+
+    Returns:
+        Dict mapping shortname to list of XML page strings (streaming mode returns None).
     """
     setup_logger()
     semaphore = asyncio.Semaphore(concurrency)
@@ -215,8 +228,17 @@ async def harvest_all_journals(
 
 
 def _node_text(node) -> str:
-    """selectolax, CDATA icerigini HTML yorumuna cevirir; bu yuzden serialized HTML
-    uzerinden etiketleri ve CDATA isaretlerini temizleyip metni cikarir."""
+    """Extract text content from a selectolax node, handling CDATA sections.
+
+    selectolax converts CDATA to HTML comments; this function strips
+    surrounding tags and CDATA markers to return plain text.
+
+    Args:
+        node: A selectolax HTML node.
+
+    Returns:
+        Cleaned text content.
+    """
     html = node.html or ""
     inner = re.sub(r"^<[^<>]*>", "", html)
     inner = re.sub(r"<[^<>]*>$", "", inner)
@@ -225,12 +247,18 @@ def _node_text(node) -> str:
 
 
 def parse_article_metadata(xml_text: str) -> dict:
-    """Tek bir OAI kaydinin (oai_dc) ham XML'inden makale metadatasini cikarir.
+    """Parse article metadata from a single OAI-PMH (oai_dc) XML record.
 
-    Donus alanlari: title, doi, authors (list[str]), publication_date,
-                     journal_shortname, oai_identifier.
-    Alan bulunamazsa "" veya [] doner; hicbir zaman crash yapmaz.
-    GÖREV 5'in dondurdugu ham OAI XML seklıyle uyumludur.
+    Extracts title (prefers en-US), DOI, authors, publication date,
+    journal shortname, OAI identifier, and journal name.
+
+    Args:
+        xml_text: Raw OAI-PMH XML for a single record.
+
+    Returns:
+        Dict with keys: title, doi, authors, publication_date,
+        journal_shortname, oai_identifier, journal_name. Empty string/list
+        for missing fields (never raises).
     """
     tree = HTMLParser(xml_text)
     titles: list[tuple[str, str]] = []  # (text, lang)
@@ -320,14 +348,20 @@ PDF_ERRORS_PATH = Path("data/pdf_errors.json")
 
 @retry(max_attempts=3, backoff=1.0)
 async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> str | None:
-    """Makale detay sayfasindan PDF indirme linkini ceker.
+    """Extract PDF download URL from a DergiPark article detail page.
 
-    DergiPark makale sayfalarinda PDF linki:
-      - /tr/download/article-file/{id}  (en yaygin pattern)
-      - /download/article/{id}
-      - .pdf uzantili link
-    selectolax ile HTML parse eder, ilk PDF linkini dondurur.
-    Bulamazsa None dondurur.
+    Searches for links in priority order:
+    1. /download/article-file/{id} (most common pattern)
+    2. Links containing 'download' with .pdf extension
+    3. Any .pdf extension link
+    4. Any link containing .pdf
+
+    Args:
+        client: Async HTTP client.
+        article_url: Full URL of the article detail page.
+
+    Returns:
+        Absolute PDF URL if found, None otherwise.
     """
     logger.debug("PDF linki cekiliyor: {}", article_url)
     resp = await client.get(
@@ -365,7 +399,15 @@ async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> 
 
 
 def _resolve_pdf_url(base_url: str, href: str) -> str:
-    """Goreli PDF URL'ini mutlak URL'ye cevirir."""
+    """Convert a relative PDF href to an absolute URL.
+
+    Args:
+        base_url: Base article URL for resolving relative paths.
+        href: The href attribute from an <a> tag.
+
+    Returns:
+        Absolute URL string.
+    """
     if href.startswith("http"):
         return href
     if href.startswith("/"):
@@ -387,13 +429,13 @@ async def download_pdf(
     """PDF dosyasini stream modunda indirir.
 
     Args:
-        client: httpx.AsyncClient
-        pdf_url: PDF dosyasinin URL'i
-        dest_path: Kaydedilecek dosya yolu (orn. data/raw_pdfs/oai_id.pdf)
-        inter_request_delay: indirme sonrasi bekleme (rate-limit)
+        client: httpx.AsyncClient.
+        pdf_url: URL of the PDF file.
+        dest_path: Destination file path (e.g. data/raw_pdfs/oai_id.pdf).
+        inter_request_delay: Delay after download in seconds (rate-limit).
 
     Returns:
-        True basarili, False basarisiz.
+        True if download succeeded, False otherwise.
     """
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -417,7 +459,11 @@ async def download_pdf(
 
 
 def load_pdf_errors() -> list[dict]:
-    """pdf_errors.json dosyasindaki hata listesini okur."""
+    """Load the PDF error list from pdf_errors.json.
+
+    Returns:
+        List of error dicts, or empty list if file missing/invalid.
+    """
     if not PDF_ERRORS_PATH.exists():
         return []
     try:
@@ -427,19 +473,27 @@ def load_pdf_errors() -> list[dict]:
 
 
 def save_pdf_errors(errors: list[dict]) -> None:
-    """pdf_errors.json dosyasina hata listesini yazar."""
+    """Write the PDF error list to pdf_errors.json.
+
+    Args:
+        errors: List of error dicts to persist.
+    """
     PDF_ERRORS_PATH.parent.mkdir(parents=True, exist_ok=True)
     PDF_ERRORS_PATH.write_text(json.dumps(errors, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def log_pdf_error(oai_id: str, article_url: str, error: str, is_transient: bool = False) -> None:
-    """Basarisiz PDF indirmesini pdf_errors.json'a kaydeder.
+    """Log a failed PDF download to pdf_errors.json.
 
-    Ayni oai_id icin tekrar cagirilirsa retry_count artirilir.
-    is_transient=True ise retry_count artirilmaz (gecici hata).
+    If the same oai_id already exists, increments retry_count.
+    Transient errors (is_transient=True) do not increment retry_count.
+
+    Args:
+        oai_id: OAI identifier of the article.
+        article_url: URL of the article page.
+        error: Error message string.
+        is_transient: Whether the error is temporary (e.g. 429, 500).
     """
-    from datetime import datetime
-
     errors = load_pdf_errors()
     existing = next((e for e in errors if e.get("oai_id") == oai_id), None)
     if existing:
@@ -461,7 +515,15 @@ def log_pdf_error(oai_id: str, article_url: str, error: str, is_transient: bool 
 
 
 def is_permanently_failed(oai_id: str, max_retries: int = 3) -> bool:
-    """Makale max retry sayisini asip asamadigini kontrol eder."""
+    """Check if an article has exceeded the maximum retry count.
+
+    Args:
+        oai_id: OAI identifier of the article.
+        max_retries: Maximum allowed retry attempts.
+
+    Returns:
+        True if retry_count >= max_retries.
+    """
     errors = load_pdf_errors()
     entry = next((e for e in errors if e.get("oai_id") == oai_id), None)
     if not entry:
@@ -470,7 +532,11 @@ def is_permanently_failed(oai_id: str, max_retries: int = 3) -> bool:
 
 
 def remove_pdf_error(oai_id: str) -> None:
-    """Basarili indirmesinden sonra makaleyi hata listesinden siler."""
+    """Remove an article from the PDF error list after successful download.
+
+    Args:
+        oai_id: OAI identifier of the article to remove.
+    """
     errors = load_pdf_errors()
     errors = [e for e in errors if e.get("oai_id") != oai_id]
     save_pdf_errors(errors)

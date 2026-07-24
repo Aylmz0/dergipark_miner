@@ -1,4 +1,4 @@
-"""src/enrich.py + src/storage.py insert_citation testleri."""
+"""Tests for src/enrich.py and src/storage.py insert_citation."""
 
 import asyncio
 
@@ -15,7 +15,7 @@ from src.storage import init_db, insert_article, insert_citation
 
 
 def _make_article(conn, title="Test Article", oai_id="oai:test:1", doi=None):
-    """Test icut article olusturur ve id dondurur."""
+    """Create a test article and return its ID."""
     article = {
         "title": title,
         "doi": doi or "",
@@ -29,13 +29,13 @@ def _make_article(conn, title="Test Article", oai_id="oai:test:1", doi=None):
 
 
 def _make_client(handler):
-    """Mock httpx.AsyncClient olusturur."""
+    """Create a mock httpx.AsyncClient."""
     transport = httpx.MockTransport(handler)
     return httpx.AsyncClient(transport=transport, base_url="https://api.openalex.org")
 
 
 def _ok_handler(request: httpx.Request) -> httpx.Response:
-    """Basariyla work JSON donduren handler."""
+    """Return a successful work JSON response."""
     body = {
         "id": "https://openalex.org/W123",
         "doi": "https://doi.org/10.1000/test",
@@ -49,12 +49,12 @@ def _ok_handler(request: httpx.Request) -> httpx.Response:
 
 
 def _not_found_handler(request: httpx.Request) -> httpx.Response:
-    """Bos sonuc donduren handler (results=[])."""
+    """Return empty results response."""
     return httpx.Response(200, json={"results": []})
 
 
 def _error_handler(request: httpx.Request) -> httpx.Response:
-    """500 donduren handler."""
+    """Return 500 error response."""
     return httpx.Response(500, text="Internal Server Error")
 
 
@@ -265,7 +265,7 @@ def test_enrich_existing_citations_updates_doi_and_title(tmp_path):
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, oai_id="oai:test:enrich_cite1")
 
-    # cited_openalex_id dolu, cited_doi bos citation olustur
+    # cited_openalex_id set but cited_doi is NULL
     cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W777")
     conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
     conn.commit()
@@ -291,12 +291,12 @@ def test_enrich_existing_citations_links_to_our_db(tmp_path):
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, oai_id="oai:test:enrich_cite2")
 
-    # Bizim DB'mizdeki bir makaleyi referans alalim
+    # Reference an article in our DB
     target_id = _make_article(conn, title="Target Article", oai_id="oai:test:target")
     conn.execute("UPDATE articles SET doi = '10.9999/target' WHERE id = ?", (target_id,))
     conn.commit()
 
-    # Bos DOI'li citation olustur
+    # Create citation with empty DOI
     cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="W888")
     conn.execute("UPDATE citations SET cited_doi = NULL, cited_title = NULL WHERE id = ?", (cid,))
     conn.commit()
@@ -323,7 +323,7 @@ def test_enrich_existing_citations_skips_already_enriched(tmp_path):
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, oai_id="oai:test:enrich_cite3")
 
-    # cited_doi zaten dolu olan citation
+    # cited_doi already set — should be skipped
     insert_citation(conn, citing_article_id=aid, cited_openalex_id="W999", cited_doi="10.1000/already")
 
     client = _make_client(lambda r: httpx.Response(200, json={}))
@@ -334,7 +334,7 @@ def test_enrich_existing_citations_skips_already_enriched(tmp_path):
 
 
 def test_enrich_article_citations_404_does_not_raise(tmp_path):
-    """404 hatalari exception yerine debug log olarak islenir."""
+    """404 errors are handled as debug logs, not exceptions."""
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, title="Test Article", oai_id="oai:test:enrich404")
     client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
@@ -345,7 +345,7 @@ def test_enrich_article_citations_404_does_not_raise(tmp_path):
 
 
 def test_enrich_existing_citations_404_does_not_raise(tmp_path):
-    """404 hatalari enrichment sirasinda exception firlatmaz, isaretlenir."""
+    """404 errors during enrichment are marked, not raised."""
     conn = init_db(str(tmp_path / "test.db"))
     aid = _make_article(conn, oai_id="oai:test:enrich_cite404")
     cid = insert_citation(conn, citing_article_id=aid, cited_openalex_id="WMISSING")
@@ -355,14 +355,14 @@ def test_enrich_existing_citations_404_does_not_raise(tmp_path):
     client = _make_client(lambda r: httpx.Response(404, text="Not Found"))
     result = asyncio.run(enrich_existing_citations(client, conn))
 
-    # 404 = bulunamadi, isaretlendi (enriched sayilir, sonsuz dongu olmesin)
+    # 404 = not found, marked as enriched (prevents infinite loop)
     assert result["enriched"] == 1
     assert result["failed"] == 0
     conn.close()
 
 
 def test_enrich_all_articles_skips_already_enriched(tmp_path):
-    """enriched_at dolu makaleler atlanir."""
+    """Articles with enriched_at set are skipped."""
     conn = init_db(str(tmp_path / "test.db"))
     _make_article(conn, oai_id="oai:test:enriched1", doi="10.1111/done")
     _make_article(conn, oai_id="oai:test:notdone1", doi="10.2222/todo")
@@ -391,7 +391,7 @@ def test_enrich_all_articles_skips_already_enriched(tmp_path):
     client = _make_client(handler)
     result = asyncio.run(enrich_all_articles(client, conn, concurrency=1, batch_size=50))
 
-    # Sadece 1 makale islendi (enriched_at'i olmayan)
+    # Only 1 article processed (the one without enriched_at)
     assert result["enriched"] == 1
     assert call_count == 1
     conn.close()
