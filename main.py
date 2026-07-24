@@ -23,9 +23,10 @@ from loguru import logger
 
 from src.crawler import (
     DEFAULT_USER_AGENT,
+    _pdf_link_priority,
+    _resolve_pdf_url,
     _split_records,
     download_pdf,
-    fetch_article_pdf_url,
     fetch_journals,
     harvest_all_journals,
     is_permanently_failed,
@@ -33,6 +34,7 @@ from src.crawler import (
     log_pdf_error,
     parse_article_metadata,
     remove_pdf_error,
+    scrape_article_html_metadata,
 )
 from src.enrich import enrich_all_articles, enrich_existing_citations
 from src.exporter import export_all_articles
@@ -67,6 +69,55 @@ def _check_shutdown():
     """Check if shutdown was requested. Raises to exit gracefully."""
     if _shutdown_requested:
         raise KeyboardInterrupt("Graceful shutdown")
+
+
+def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
+    """Update article with metadata scraped from HTML page.
+
+    Only updates fields that are empty in the DB but present in html_meta.
+    Does NOT overwrite OAI-PMH data.
+
+    Args:
+        conn: SQLite connection.
+        oai_id: OAI identifier of the article.
+        html_meta: Dict from scrape_article_html_metadata().
+    """
+    if not oai_id:
+        return
+    row = conn.execute(
+        "SELECT id, abstract, keywords, language FROM articles WHERE oai_identifier = ?",
+        (oai_id,),
+    ).fetchone()
+    if not row:
+        return
+    article_id, cur_abstract, cur_keywords, cur_language = row
+
+    updates: list[str] = []
+    params: list = []
+
+    # abstract: update if empty
+    if not cur_abstract and html_meta.get("abstract"):
+        updates.append("abstract = ?")
+        params.append(html_meta["abstract"])
+
+    # keywords: update if empty
+    if not cur_keywords and html_meta.get("keywords"):
+        import json
+        updates.append("keywords = ?")
+        params.append(json.dumps(html_meta["keywords"], ensure_ascii=False))
+
+    # language: update if empty
+    if not cur_language and html_meta.get("language"):
+        updates.append("language = ?")
+        params.append(html_meta["language"])
+
+    if updates:
+        params.append(article_id)
+        conn.execute(
+            f"UPDATE articles SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+        conn.commit()
 
 
 async def run(skip_enrich: bool = False, limit: int = 0) -> None:
@@ -278,7 +329,38 @@ async def _run_pipeline(
             max_immediate_retries = 3
             for attempt in range(max_immediate_retries):
                 try:
-                    pdf_url = await fetch_article_pdf_url(client, article_url)
+                    # Fetch article page once: extract PDF URL + metadata
+                    resp = await client.get(
+                        article_url,
+                        headers={"User-Agent": DEFAULT_USER_AGENT},
+                        follow_redirects=True,
+                    )
+                    resp.raise_for_status()
+
+                    # Extract PDF URL from HTML
+                    from selectolax.parser import HTMLParser as _HP
+                    tree = _HP(resp.text)
+                    best: str | None = None
+                    best_priority = 999
+                    for anchor in tree.css("a"):
+                        href = anchor.attributes.get("href") or ""
+                        if not href:
+                            continue
+                        priority = _pdf_link_priority(href)
+                        if priority < best_priority:
+                            best = href
+                            best_priority = priority
+                            if priority == 0:
+                                break
+                    pdf_url = _resolve_pdf_url(article_url, best) if best else None
+
+                    # Extract metadata from HTML and update DB
+                    try:
+                        html_meta = scrape_article_html_metadata(resp.text)
+                        _update_article_metadata(conn, oai_id, html_meta)
+                    except Exception:
+                        pass  # Non-fatal: metadata scrape failure shouldn't block PDF
+
                     if not pdf_url:
                         log_pdf_error(oai_id, article_url, "PDF link not found")
                         return False, True

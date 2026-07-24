@@ -267,15 +267,16 @@ def parse_article_metadata(xml_text: str) -> dict:
     """Parse article metadata from a single OAI-PMH (oai_dc) XML record.
 
     Extracts title (prefers en-US), DOI, authors, publication date,
-    journal shortname, OAI identifier, and journal name.
+    journal shortname, OAI identifier, journal name, abstract, keywords,
+    and language.
 
     Args:
         xml_text: Raw OAI-PMH XML for a single record.
 
     Returns:
         Dict with keys: title, doi, authors, publication_date,
-        journal_shortname, oai_identifier, journal_name. Empty string/list
-        for missing fields (never raises).
+        journal_shortname, oai_identifier, journal_name, abstract,
+        keywords, language. Empty string/list for missing fields.
     """
     tree = HTMLParser(xml_text)
     titles: list[tuple[str, str]] = []  # (text, lang)
@@ -284,6 +285,9 @@ def parse_article_metadata(xml_text: str) -> dict:
     identifiers: list[str] = []
     relations: list[str] = []
     sources: list[str] = []
+    descriptions: list[str] = []
+    subjects: list[str] = []
+    languages: list[str] = []
 
     # Extract header <identifier> (oai:dergipark.org.tr:article/...)
     oai_id = ""
@@ -309,6 +313,12 @@ def parse_article_metadata(xml_text: str) -> dict:
             relations.append(text)
         elif tag == "dc:source":
             sources.append(text)
+        elif tag == "dc:description":
+            descriptions.append(text)
+        elif tag == "dc:subject":
+            subjects.append(text)
+        elif tag == "dc:language":
+            languages.append(text)
 
     # Prefer English title; fall back to first available
     title = ""
@@ -345,6 +355,17 @@ def parse_article_metadata(xml_text: str) -> dict:
             journal_name = src
             break
 
+    # abstract: longest dc:description (multiple may exist)
+    abstract = ""
+    if descriptions:
+        abstract = max(descriptions, key=len).strip()
+
+    # keywords: all dc:subject values
+    keywords = [s.strip() for s in subjects if s.strip()]
+
+    # language: first dc:language value
+    language = languages[0].strip() if languages else ""
+
     return {
         "title": title,
         "doi": doi,
@@ -353,6 +374,9 @@ def parse_article_metadata(xml_text: str) -> dict:
         "journal_shortname": journal_shortname,
         "oai_identifier": oai_id,
         "journal_name": journal_name,
+        "abstract": abstract,
+        "keywords": keywords,
+        "language": language,
     }
 
 
@@ -403,6 +427,57 @@ async def fetch_article_pdf_url(client: httpx.AsyncClient, article_url: str) -> 
                 break
 
     return _resolve_pdf_url(article_url, best) if best else None
+
+
+def scrape_article_html_metadata(html: str) -> dict:
+    """Extract rich metadata from DergiPark article page HTML <meta> tags.
+
+    Extracts: abstract, keywords, language, orcid (list), article_type,
+    issn, issue, references (list).
+
+    Args:
+        html: Raw HTML of a DergiPark article detail page.
+
+    Returns:
+        Dict with extracted fields. Empty string/list for missing fields.
+    """
+    tree = HTMLParser(html)
+    result: dict = {
+        "abstract": "",
+        "keywords": [],
+        "language": "",
+        "orcid": [],
+        "article_type": "",
+        "issn": "",
+        "issue": "",
+        "references": [],
+    }
+
+    for node in tree.css("meta"):
+        name = (node.attributes.get("name") or "").lower()
+        content = (node.attributes.get("content") or "").strip()
+        if not content:
+            continue
+
+        if name == "citation_abstract":
+            result["abstract"] = content
+        elif name == "citation_keywords":
+            result["keywords"] = [k.strip() for k in content.split(";") if k.strip()]
+        elif name == "citation_language":
+            result["language"] = content
+        elif name == "citation_author_orcid":
+            result["orcid"].append(content)
+        elif name == "dc.type.articletype" or name == "citation_article_type":
+            result["article_type"] = content
+        elif name == "dc.source.issn" or name == "citation_issn":
+            if not result["issn"]:
+                result["issn"] = content
+        elif name == "dc.source.issue" or name == "citation_issue":
+            result["issue"] = content
+        elif name == "citation_reference":
+            result["references"].append(content)
+
+    return result
 
 
 def _pdf_link_priority(href: str) -> int:

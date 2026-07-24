@@ -1,8 +1,25 @@
 """SQLite persistence layer for journals, articles, authors, and citations."""
 
 import hashlib
+import json
 import sqlite3
 from pathlib import Path
+
+
+def _json_dumps(obj: list) -> str:
+    """Serialize a list to JSON string for storage."""
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _json_loads(text: str | None) -> list:
+    """Deserialize a JSON string to list, returning [] on failure."""
+    if not text:
+        return []
+    try:
+        result = json.loads(text)
+        return result if isinstance(result, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
 
 
 def init_db(path: str | Path) -> sqlite3.Connection:
@@ -14,7 +31,8 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     Schema:
         journals: id, short_name (UNIQUE), name, created_at
         articles: id, journal_id (FK), title, doi, publication_date,
-                  oai_identifier, enriched_at, content_hash, created_at
+                  oai_identifier, abstract, keywords, language,
+                  enriched_at, content_hash, created_at
         authors: id, article_id (FK), name, created_at
         citations: id, citing_article_id (FK), cited_article_id (FK),
                    cited_openalex_id, cited_doi, cited_title, created_at
@@ -47,7 +65,11 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             doi            TEXT,
             publication_date TEXT,
             oai_identifier TEXT,
+            abstract       TEXT,
+            keywords       TEXT,
+            language       TEXT,
             enriched_at    TEXT,
+            content_hash   TEXT,
             created_at     TEXT DEFAULT (datetime('now')),
             FOREIGN KEY (journal_id) REFERENCES journals(id)
         );
@@ -91,6 +113,18 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     # content_hash column may be missing; add it (for dedup)
     if "content_hash" not in cols:
         conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
+
+    # abstract column may be missing; add it
+    if "abstract" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN abstract TEXT")
+
+    # keywords column may be missing; add it
+    if "keywords" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN keywords TEXT")
+
+    # language column may be missing; add it
+    if "language" not in cols:
+        conn.execute("ALTER TABLE articles ADD COLUMN language TEXT")
 
     # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
@@ -171,7 +205,8 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     Args:
         conn: SQLite connection.
         article: Dict with keys: title, doi, authors, publication_date,
-                 journal_shortname, oai_identifier, journal_name.
+                 journal_shortname, oai_identifier, journal_name,
+                 abstract, keywords, language.
 
     Returns:
         The article's row ID.
@@ -184,6 +219,9 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     publication_date = article.get("publication_date") or ""
     oai_identifier = article.get("oai_identifier") or ""
     authors = article.get("authors") or []
+    abstract = article.get("abstract") or ""
+    keywords = article.get("keywords") or []
+    language = article.get("language") or ""
 
     article_id = None
 
@@ -197,10 +235,12 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
             conn.execute(
                 """
                 UPDATE articles
-                SET journal_id=?, title=?, doi=?, publication_date=?, oai_identifier=?
+                SET journal_id=?, title=?, doi=?, publication_date=?,
+                    oai_identifier=?, abstract=?, keywords=?, language=?
                 WHERE id=?
                 """,
-                (journal_id, title, doi, publication_date, oai_identifier, article_id),
+                (journal_id, title, doi, publication_date, oai_identifier,
+                 abstract, _json_dumps(keywords), language, article_id),
             )
 
     # 2. Find by DOI
@@ -211,10 +251,12 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
             conn.execute(
                 """
                 UPDATE articles
-                SET journal_id=?, title=?, publication_date=?, oai_identifier=?
+                SET journal_id=?, title=?, publication_date=?, oai_identifier=?,
+                    abstract=?, keywords=?, language=?
                 WHERE id=?
                 """,
-                (journal_id, title, publication_date, oai_identifier, article_id),
+                (journal_id, title, publication_date, oai_identifier,
+                 abstract, _json_dumps(keywords), language, article_id),
             )
 
     # 3. Find by content hash (when no DOI or OAI ID)
@@ -233,10 +275,12 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
             content_hash = _make_content_hash(title, journal_id, publication_date)
         cur = conn.execute(
             """
-            INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier, content_hash)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO articles (journal_id, title, doi, publication_date, oai_identifier,
+                                  content_hash, abstract, keywords, language)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (journal_id, title, doi, publication_date, oai_identifier, content_hash),
+            (journal_id, title, doi, publication_date, oai_identifier,
+             content_hash, abstract, _json_dumps(keywords), language),
         )
         article_id = cur.lastrowid
 

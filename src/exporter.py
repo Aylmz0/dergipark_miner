@@ -23,6 +23,17 @@ def _normalize_doi(doi: str | None) -> str | None:
     return doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
 
 
+def _json_loads(text: str | None) -> list:
+    """Deserialize a JSON string to list, returning [] on failure."""
+    if not text:
+        return []
+    try:
+        result = json.loads(text)
+        return result if isinstance(result, list) else []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
 def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
     """Build a JSONL row dict for one article with authors and citations.
 
@@ -65,6 +76,9 @@ def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
         "oai_identifier": oai_id,
         "url": url,
         "pdf_downloaded": pdf_downloaded,
+        "abstract": article.get("abstract") or "",
+        "keywords": _json_loads(article.get("keywords")),
+        "language": article.get("language") or "",
         "authors": authors,
         "citations": citations,
     }
@@ -77,7 +91,8 @@ def export_all_articles(
     """Export all articles to a single JSONL file.
 
     Articles are sorted by journal slug, then by ID. Each line contains:
-    {"slug": ..., "title": ..., "doi": ..., "date": ..., "authors": [...], "citations": [...]}
+    {"slug": ..., "title": ..., "doi": ..., "date": ..., "abstract": ...,
+     "keywords": [...], "language": ..., "authors": [...], "citations": [...]}
 
     Per-row error handling: if a single article fails to build, it is skipped
     and counted as failed. The export does not crash on bad data.
@@ -97,7 +112,8 @@ def export_all_articles(
     articles = conn.execute(
         """
         SELECT a.id, a.title, a.doi, a.publication_date,
-               a.oai_identifier, j.short_name AS journal_short
+               a.oai_identifier, a.abstract, a.keywords, a.language,
+               j.short_name AS journal_short
         FROM articles a
         JOIN journals j ON a.journal_id = j.id
         ORDER BY j.short_name, a.id

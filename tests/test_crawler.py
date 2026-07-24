@@ -195,6 +195,10 @@ SAMPLE_RECORD_XML = """<?xml version="1.0"?>
           <dc:identifier>https://dergipark.org.tr/en/pub/ihad/article/1057489</dc:identifier>
           <dc:identifier>https://doi.org/10.29228/ihad.12345</dc:identifier>
           <dc:relation>https://dergipark.org.tr/en/pub/ihad</dc:relation>
+          <dc:description>This article examines the influence of fatwa...</dc:description>
+          <dc:subject>Islamic Law</dc:subject>
+          <dc:subject>Fatwa</dc:subject>
+          <dc:language>en</dc:language>
         </oai_dc:dc>
       </metadata>
     </record>
@@ -212,7 +216,10 @@ def test_parse_article_metadata_extracts_fields():
     assert meta["publication_date"] == "2022-01-14"
     assert meta["journal_shortname"] == "ihad"
     assert meta["oai_identifier"] == "oai:dergipark.org.tr:article/1057489"
-    assert "journal_name" in meta
+    assert meta["journal_name"] == ""
+    assert meta["abstract"] == "This article examines the influence of fatwa..."
+    assert meta["keywords"] == ["Islamic Law", "Fatwa"]
+    assert meta["language"] == "en"
 
 
 def test_parse_article_metadata_handles_missing_fields():
@@ -225,6 +232,9 @@ def test_parse_article_metadata_handles_missing_fields():
     assert meta["journal_shortname"] == ""
     assert meta["oai_identifier"] == ""
     assert meta["journal_name"] == ""
+    assert meta["abstract"] == ""
+    assert meta["keywords"] == []
+    assert meta["language"] == ""
 
 
 def test_parse_article_metadata_prefers_en_title():
@@ -450,4 +460,61 @@ def test_log_pdf_error_permanent_increments(tmp_path, monkeypatch):
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
     errors = load_pdf_errors()
     assert errors[0]["retry_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# scrape_article_html_metadata tests
+# ---------------------------------------------------------------------------
+
+
+def test_scrape_article_html_metadata_extracts_all():
+    from src.crawler import scrape_article_html_metadata
+
+    html = """<html><head>
+    <meta name="citation_abstract" content="This is the abstract." />
+    <meta name="citation_keywords" content="keyword1;keyword2;keyword3" />
+    <meta name="citation_language" content="en" />
+    <meta name="citation_author_orcid" content="0000-0001-2345-6789" />
+    <meta name="citation_author_orcid" content="0000-0002-3456-7890" />
+    <meta name="DC.Type.articleType" content="Research Article" />
+    <meta name="DC.Source.ISSN" content="1234-5678" />
+    <meta name="DC.Source.Issue" content="39" />
+    <meta name="citation_reference" content="Ref A" />
+    <meta name="citation_reference" content="Ref B" />
+    <meta name="citation_pdf_url" content="/tr/download/article-file/123" />
+    </head><body></body></html>"""
+
+    result = scrape_article_html_metadata(html)
+    assert result["abstract"] == "This is the abstract."
+    assert result["keywords"] == ["keyword1", "keyword2", "keyword3"]
+    assert result["language"] == "en"
+    assert result["orcid"] == ["0000-0001-2345-6789", "0000-0002-3456-7890"]
+    assert result["article_type"] == "Research Article"
+    assert result["issn"] == "1234-5678"
+    assert result["issue"] == "39"
+    assert result["references"] == ["Ref A", "Ref B"]
+
+
+def test_scrape_article_html_metadata_empty():
+    from src.crawler import scrape_article_html_metadata
+
+    result = scrape_article_html_metadata("<html><head></head><body></body></html>")
+    assert result["abstract"] == ""
+    assert result["keywords"] == []
+    assert result["language"] == ""
+    assert result["orcid"] == []
+    assert result["article_type"] == ""
+    assert result["issn"] == ""
+    assert result["issue"] == ""
+    assert result["references"] == []
+
+
+def test_scrape_article_html_metadata_citation_issn_fallback():
+    from src.crawler import scrape_article_html_metadata
+
+    html = """<html><head>
+    <meta name="citation_issn" content="9999-0000" />
+    </head><body></body></html>"""
+    result = scrape_article_html_metadata(html)
+    assert result["issn"] == "9999-0000"
 
