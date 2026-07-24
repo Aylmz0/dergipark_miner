@@ -3,16 +3,19 @@
 Pipeline: discover journals -> OAI-PMH harvest -> parse -> SQLite ->
 PDF download -> OpenAlex enrichment -> JSONL export.
 
-Resumes from checkpoint.
+Resumes from checkpoint. Handles Ctrl+C gracefully.
 
 Usage:
     python main.py                  # full pipeline
     python main.py --skip-enrich    # skip OpenAlex enrichment
-    python main.py --limit 50       # max 50 articles per journal
-    python main.py --limit 0        # unlimited articles
+    python main.py --limit 50       # max 50 journals
+    python main.py --limit 0        # unlimited journals
 """
 
 import argparse
+import asyncio
+import contextlib
+import signal
 from pathlib import Path
 
 import httpx
@@ -38,6 +41,9 @@ from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_log
 
 CHECKPOINT_PATH = Path("checkpoint.json")
 
+# Shutdown flag for graceful Ctrl+C handling
+_shutdown_requested = False
+
 
 def _save_ckpt(ckpt: dict) -> None:
     """Save checkpoint safely (atomic write)."""
@@ -47,8 +53,27 @@ def _save_ckpt(ckpt: dict) -> None:
         logger.warning("Checkpoint yazilamadi")
 
 
+def _handle_signal(signum, frame):
+    """Handle SIGINT/SIGTERM for graceful shutdown."""
+    global _shutdown_requested
+    if _shutdown_requested:
+        logger.warning("Tekrar Ctrl+C — zorla cikiliyor")
+        raise SystemExit(1)
+    _shutdown_requested = True
+    logger.warning("Ctrl+C alindi — mevcut isler tamamlanip cikiliyor...")
+
+
+def _check_shutdown():
+    """Check if shutdown was requested. Raises to exit gracefully."""
+    if _shutdown_requested:
+        raise KeyboardInterrupt("Graceful shutdown")
+
+
 async def run(skip_enrich: bool = False, limit: int = 0) -> None:
     """Run the full mining pipeline."""
+    global _shutdown_requested
+    _shutdown_requested = False
+
     setup_logger()
     logger.info("=== dergipark-miner started ===")
 
@@ -80,133 +105,178 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
         headers={"User-Agent": DEFAULT_USER_AGENT},
         timeout=httpx.Timeout(60.0),
     ) as client:
-        # 2. Discover journals (auto-pagination)
         try:
-            all_journals = await fetch_journals(client)
-            discovered_journals = [j["short_name"] for j in all_journals]
-            insert_journals(conn, all_journals)
-            ckpt["discovered_journals"] = discovered_journals
-            _save_ckpt(ckpt)
-            logger.info("Journal list: {} journals found, saved to DB", len(all_journals))
-        except Exception:
-            logger.exception("Failed to fetch journal list")
-            if discovered_journals:
-                logger.warning("Using {} journals from checkpoint", len(discovered_journals))
-                all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
-            else:
-                logger.error("Failed to fetch journals and no checkpoint data, exiting")
-                conn.close()
-                return
-
-        # Skip already-processed journals from checkpoint
-        remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
-        if processed_shortnames:
-            logger.info(
-                "Checkpoint: {} journals to skip, {} journals to process",
-                len(processed_shortnames),
-                len(remaining),
-            )
-
-        # Adaptive delay tracker
-        adaptive_delay = AdaptiveDelay(
-            default=2.0,
-            min_delay=0.5,
-            max_delay=30.0,
-            backoff_factor=2.0,
-            decay_factor=0.9,
-        )
-        if ckpt.get("adaptive_delays"):
-            adaptive_delay = AdaptiveDelay.from_dict(ckpt["adaptive_delays"])
-
-        # 3. OAI-PMH harvest + parse + insert (streaming)
-        remaining_names = [j["short_name"] for j in remaining]
-        if limit > 0:
-            remaining_names = remaining_names[:limit]
-            logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
-        max_per_journal = 999999
-
-        def on_journal_done(shortname: str, xml_pages: list[str]) -> None:
-            """Called when each journal harvest completes: parse XML and write to DB."""
-            nonlocal processed_articles
-            for xml_text in xml_pages:
-                for record_xml in _split_records(xml_text):
-                    try:
-                        meta = parse_article_metadata(record_xml)
-                        insert_article(conn, meta)
-                        processed_articles += 1
-                    except Exception as exc:
-                        failed_articles.append({"shortname": shortname, "error": str(exc)})
-
-            if xml_pages:
-                # Success — add to processed list
-                processed_shortnames.append(shortname)
-                if shortname in failed_journals:
-                    del failed_journals[shortname]
-            else:
-                # Failed — add to failed list, do NOT add to processed
-                if shortname not in failed_journals:
-                    failed_journals[shortname] = "no records returned"
-
-            ckpt.update(
-                {
-                    "processed_shortnames": processed_shortnames,
-                    "processed_articles": processed_articles,
-                    "failed_journals": failed_journals,
-                    "failed_articles": failed_articles,
-                    "adaptive_delays": adaptive_delay.to_dict(),
-                }
-            )
-            _save_ckpt(ckpt)
-
-        try:
-            await harvest_all_journals(
+            await _run_pipeline(
                 client,
-                remaining_names,
-                concurrency=1,
-                max_records_per_journal=max_per_journal,
-                inter_request_delay=2.0,
-                adaptive_delay=adaptive_delay,
-                on_journal_done=on_journal_done,
+                conn,
+                ckpt,
+                discovered_journals=discovered_journals,
+                processed_shortnames=processed_shortnames,
+                failed_journals=failed_journals,
+                failed_articles=failed_articles,
+                processed_articles=processed_articles,
+                pdf_downloaded=pdf_downloaded,
+                pdf_failed=pdf_failed,
+                skip_enrich=skip_enrich,
+                limit=limit,
             )
-            logger.info("Harvest done: {} articles total", processed_articles)
+        except KeyboardInterrupt:
+            logger.warning("Graceful shutdown — checkpoint kaydediliyor...")
         except Exception:
-            logger.exception("Harvest failed")
+            logger.exception("Pipeline error")
+        finally:
+            _save_ckpt(ckpt)
+            conn.close()
+            logger.info("=== dergipark-miner finished ===")
 
-        # Mark remaining journals as incomplete
-        for shortname in remaining_names:
-            if shortname not in processed_shortnames and shortname not in failed_journals:
-                failed_journals[shortname] = "harvest incomplete"
 
-        # Trim failed_journals (keep checkpoint size small)
-        if len(failed_journals) > 100:
-            sorted_keys = sorted(failed_journals.keys())
-            failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
+async def _run_pipeline(
+    client: httpx.AsyncClient,
+    conn,
+    ckpt: dict,
+    *,
+    discovered_journals: list[str],
+    processed_shortnames: list[str],
+    failed_journals: dict[str, str],
+    failed_articles: list[dict],
+    processed_articles: int,
+    pdf_downloaded: int,
+    pdf_failed: int,
+    skip_enrich: bool,
+    limit: int,
+) -> None:
+    """Core pipeline logic. Can be interrupted gracefully."""
 
+    # 2. Discover journals (auto-pagination)
+    try:
+        all_journals = await fetch_journals(client)
+        discovered_journals = [j["short_name"] for j in all_journals]
+        insert_journals(conn, all_journals)
+        ckpt["discovered_journals"] = discovered_journals
+        _save_ckpt(ckpt)
+        logger.info("Journal list: {} journals found, saved to DB", len(all_journals))
+    except Exception:
+        logger.exception("Failed to fetch journal list")
+        if discovered_journals:
+            logger.warning("Using {} journals from checkpoint", len(discovered_journals))
+            all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
+        else:
+            logger.error("Failed to fetch journals and no checkpoint data, exiting")
+            return
+
+    _check_shutdown()
+
+    # Skip already-processed journals from checkpoint
+    remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
+    if processed_shortnames:
+        logger.info(
+            "Checkpoint: {} journals to skip, {} journals to process",
+            len(processed_shortnames),
+            len(remaining),
+        )
+
+    # Adaptive delay tracker
+    adaptive_delay = AdaptiveDelay(
+        default=2.0,
+        min_delay=0.5,
+        max_delay=30.0,
+        backoff_factor=2.0,
+        decay_factor=0.9,
+    )
+    if ckpt.get("adaptive_delays"):
+        adaptive_delay = AdaptiveDelay.from_dict(ckpt["adaptive_delays"])
+
+    # 3. OAI-PMH harvest + parse + insert (streaming)
+    remaining_names = [j["short_name"] for j in remaining]
+    if limit > 0:
+        remaining_names = remaining_names[:limit]
+        logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
+    max_per_journal = 999999
+
+    def on_journal_done(shortname: str, xml_pages: list[str]) -> None:
+        """Called when each journal harvest completes: parse XML and write to DB."""
+        nonlocal processed_articles
+        for xml_text in xml_pages:
+            for record_xml in _split_records(xml_text):
+                try:
+                    meta = parse_article_metadata(record_xml)
+                    insert_article(conn, meta)
+                    processed_articles += 1
+                except Exception as exc:
+                    failed_articles.append({"shortname": shortname, "error": str(exc)})
+
+        if xml_pages:
+            processed_shortnames.append(shortname)
+            if shortname in failed_journals:
+                del failed_journals[shortname]
+        else:
+            if shortname not in failed_journals:
+                failed_journals[shortname] = "no records returned"
+
+        ckpt.update(
+            {
+                "processed_shortnames": processed_shortnames,
+                "processed_articles": processed_articles,
+                "failed_journals": failed_journals,
+                "failed_articles": failed_articles,
+                "adaptive_delays": adaptive_delay.to_dict(),
+            }
+        )
         _save_ckpt(ckpt)
 
-        # 4. PDF indirme (rate-limit aware: adaptive delay between downloads)
-        try:
-            articles = conn.execute(
-                """
-                SELECT a.id, a.oai_identifier, j.short_name
-                FROM articles a
-                JOIN journals j ON a.journal_id = j.id
-                """
-            ).fetchall()
+    try:
+        await harvest_all_journals(
+            client,
+            remaining_names,
+            concurrency=1,
+            max_records_per_journal=max_per_journal,
+            inter_request_delay=2.0,
+            adaptive_delay=adaptive_delay,
+            on_journal_done=on_journal_done,
+        )
+        logger.info("Harvest done: {} articles total", processed_articles)
+    except Exception:
+        logger.exception("Harvest failed")
 
-            pdf_checkpoint_interval = 50
-            pdf_counter = 0
-            pdf_delay = 1.5  # adaptive delay between PDF downloads
+    _check_shutdown()
 
-            async def _download_one(
-                oai_id: str, journal: str, pdf_path: Path
-            ) -> tuple[bool, bool]:
-                """Download a single PDF. Returns (downloaded, failed)."""
-                nonlocal pdf_delay
-                article_url = (
-                    f"https://dergipark.org.tr/tr/pub/{journal}/article/"
-                    f"{oai_id.split('/')[-1]}"
-                )
+    # Mark remaining journals as incomplete
+    for shortname in remaining_names:
+        if shortname not in processed_shortnames and shortname not in failed_journals:
+            failed_journals[shortname] = "harvest incomplete"
+
+    # Trim failed_journals (keep checkpoint size small)
+    if len(failed_journals) > 100:
+        sorted_keys = sorted(failed_journals.keys())
+        failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
+
+    _save_ckpt(ckpt)
+
+    # 4. PDF indirme (rate-limit aware: adaptive delay between downloads)
+    try:
+        articles = conn.execute(
+            """
+            SELECT a.id, a.oai_identifier, j.short_name
+            FROM articles a
+            JOIN journals j ON a.journal_id = j.id
+            """
+        ).fetchall()
+
+        pdf_checkpoint_interval = 25
+        pdf_counter = 0
+        pdf_delay = 1.5
+
+        async def _download_one(
+            oai_id: str, journal: str, pdf_path: Path
+        ) -> tuple[bool, bool]:
+            """Download a single PDF with immediate retry on transient errors."""
+            nonlocal pdf_delay
+            article_url = (
+                f"https://dergipark.org.tr/tr/pub/{journal}/article/"
+                f"{oai_id.split('/')[-1]}"
+            )
+            max_immediate_retries = 3
+            for attempt in range(max_immediate_retries):
                 try:
                     pdf_url = await fetch_article_pdf_url(client, article_url)
                     if not pdf_url:
@@ -223,31 +293,88 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                     is_transient = exc.response.status_code in (429, 500, 502, 503)
                     if exc.response.status_code == 429:
                         pdf_delay = min(pdf_delay * 2.0, 30.0)
-                        logger.warning("429 on PDF, delay now: {:.1f}s", pdf_delay)
+                        if attempt < max_immediate_retries - 1:
+                            wait = pdf_delay * (attempt + 1)
+                            logger.warning(
+                                "429 on PDF (attempt {}/{}), retry in {:.1f}s",
+                                attempt + 1, max_immediate_retries, wait,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
                     log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
                     return False, True
                 except Exception as exc:
                     log_pdf_error(oai_id, article_url, str(exc))
                     return False, True
+            return False, True
 
-            async def _do_download(oai_id: str, journal: str, pdf_path: Path) -> None:
-                nonlocal pdf_downloaded, pdf_failed, pdf_counter
-                downloaded, failed = await _download_one(oai_id, journal, pdf_path)
-                pdf_downloaded += downloaded
-                pdf_failed += failed
-                pdf_counter += 1
-                if pdf_counter % pdf_checkpoint_interval == 0:
-                    ckpt["pdf_downloaded"] = pdf_downloaded
-                    ckpt["pdf_failed"] = pdf_failed
-                    _save_ckpt(ckpt)
-                await asyncio.sleep(pdf_delay)
+        async def _do_download(oai_id: str, journal: str, pdf_path: Path) -> None:
+            nonlocal pdf_downloaded, pdf_failed, pdf_counter
+            downloaded, failed = await _download_one(oai_id, journal, pdf_path)
+            pdf_downloaded += downloaded
+            pdf_failed += failed
+            pdf_counter += 1
+            if pdf_counter % pdf_checkpoint_interval == 0:
+                ckpt["pdf_downloaded"] = pdf_downloaded
+                ckpt["pdf_failed"] = pdf_failed
+                _save_ckpt(ckpt)
+            _check_shutdown()
+            await asyncio.sleep(pdf_delay)
 
-            # Retry previously failed PDFs first
+        # Retry previously failed PDFs first
+        pdf_errors = load_pdf_errors()
+        for entry in pdf_errors[:]:
+            oai_id = entry.get("oai_id", "")
+            if is_permanently_failed(oai_id, max_retries=5):
+                continue
+            row = conn.execute(
+                "SELECT a.id, j.short_name FROM articles a "
+                "JOIN journals j ON a.journal_id = j.id "
+                "WHERE a.oai_identifier = ?",
+                (oai_id,),
+            ).fetchone()
+            if not row:
+                continue
+            _, journal = row
+            safe_name = oai_id.replace("/", "_") + ".pdf"
+            pdf_path = Path("data/raw_pdfs") / safe_name
+            await _do_download(oai_id, journal, pdf_path)
+
+        # Then normal download
+        for _article_id, oai_id, journal in articles:
+            if not oai_id:
+                continue
+            safe_name = oai_id.replace("/", "_") + ".pdf"
+            pdf_path = Path("data/raw_pdfs") / safe_name
+            if pdf_path.exists():
+                continue
+            if is_permanently_failed(oai_id, max_retries=5):
+                continue
+            await _do_download(oai_id, journal, pdf_path)
+
+        ckpt["pdf_downloaded"] = pdf_downloaded
+        ckpt["pdf_failed"] = pdf_failed
+        _save_ckpt(ckpt)
+        logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
+
+        # Retry loop: retry transient (429) failures up to 3 more rounds
+        for retry_round in range(1, 4):
+            if _shutdown_requested:
+                break
             pdf_errors = load_pdf_errors()
-            for entry in pdf_errors[:]:
+            retry_candidates = [
+                e for e in pdf_errors
+                if not is_permanently_failed(e.get("oai_id", ""), max_retries=5)
+                and e.get("retry_count", 0) < 5
+            ]
+            if not retry_candidates:
+                break
+            logger.info("PDF retry round {}: {} candidates", retry_round, len(retry_candidates))
+            pdf_delay = min(pdf_delay * 2.0, 30.0)
+            for entry in retry_candidates:
+                if _shutdown_requested:
+                    break
                 oai_id = entry.get("oai_id", "")
-                if is_permanently_failed(oai_id, max_retries=5):
-                    continue
                 row = conn.execute(
                     "SELECT a.id, j.short_name FROM articles a "
                     "JOIN journals j ON a.journal_id = j.id "
@@ -259,105 +386,63 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                 _, journal = row
                 safe_name = oai_id.replace("/", "_") + ".pdf"
                 pdf_path = Path("data/raw_pdfs") / safe_name
-                await _do_download(oai_id, journal, pdf_path)
-
-            # Then normal download
-            for _article_id, oai_id, journal in articles:
-                if not oai_id:
-                    continue
-                safe_name = oai_id.replace("/", "_") + ".pdf"
-                pdf_path = Path("data/raw_pdfs") / safe_name
                 if pdf_path.exists():
                     continue
-                if is_permanently_failed(oai_id, max_retries=5):
-                    continue
                 await _do_download(oai_id, journal, pdf_path)
 
-            ckpt["pdf_downloaded"] = pdf_downloaded
-            ckpt["pdf_failed"] = pdf_failed
+        ckpt["pdf_downloaded"] = pdf_downloaded
+        ckpt["pdf_failed"] = pdf_failed
+        _save_ckpt(ckpt)
+        logger.info("PDF final: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
+    except Exception:
+        logger.exception("PDF download error")
+
+    _check_shutdown()
+
+    # 5. OpenAlex zenginlestirme
+    if skip_enrich:
+        logger.info("OpenAlex enrichment skipped (--skip-enrich)")
+    else:
+
+        def on_enrich_batch(done, citations, failed):
+            ckpt["enriched_count"] = done
             _save_ckpt(ckpt)
-            logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
 
-            # Retry loop: retry transient (429) failures up to 2 more rounds
-            for retry_round in range(1, 3):
-                pdf_errors = load_pdf_errors()
-                retry_candidates = [
-                    e for e in pdf_errors
-                    if not is_permanently_failed(e.get("oai_id", ""), max_retries=5)
-                    and e.get("retry_count", 0) < 3
-                ]
-                if not retry_candidates:
-                    break
-                logger.info("PDF retry round {}: {} candidates", retry_round, len(retry_candidates))
-                pdf_delay = min(pdf_delay * 2.0, 30.0)
-                for entry in retry_candidates:
-                    oai_id = entry.get("oai_id", "")
-                    row = conn.execute(
-                        "SELECT a.id, j.short_name FROM articles a "
-                        "JOIN journals j ON a.journal_id = j.id "
-                        "WHERE a.oai_identifier = ?",
-                        (oai_id,),
-                    ).fetchone()
-                    if not row:
-                        continue
-                    _, journal = row
-                    safe_name = oai_id.replace("/", "_") + ".pdf"
-                    pdf_path = Path("data/raw_pdfs") / safe_name
-                    if pdf_path.exists():
-                        continue
-                    await _do_download(oai_id, journal, pdf_path)
-
-            ckpt["pdf_downloaded"] = pdf_downloaded
-            ckpt["pdf_failed"] = pdf_failed
-            _save_ckpt(ckpt)
-            logger.info("PDF final: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
-        except Exception:
-            logger.exception("PDF download error")
-
-        # 5. OpenAlex zenginlestirme
-        if skip_enrich:
-            logger.info("OpenAlex enrichment skipped (--skip-enrich)")
-        else:
-
-            def on_enrich_batch(done, citations, failed):
-                ckpt["enriched_count"] = done
-                _save_ckpt(ckpt)
-
-            try:
-                result = await enrich_all_articles(
-                    client,
-                    conn,
-                    concurrency=3,
-                    batch_size=50,
-                    on_batch_done=on_enrich_batch,
-                )
-                ckpt["enriched_count"] = result["enriched"]
-                _save_ckpt(ckpt)
-                logger.info(
-                    "Enrichment done: enriched={}, citations={}, failed={}",
-                    result["enriched"],
-                    result["citations_added"],
-                    result["failed"],
-                )
-            except Exception:
-                logger.exception("Enrichment error")
-
-        # 6. Citation DOI resolution
         try:
-            result2 = await enrich_existing_citations(
+            result = await enrich_all_articles(
                 client,
                 conn,
                 concurrency=3,
-                batch_size=100,
+                batch_size=50,
+                on_batch_done=on_enrich_batch,
             )
+            ckpt["enriched_count"] = result["enriched"]
+            _save_ckpt(ckpt)
             logger.info(
-                "Citation enrichment done: enriched={}, linked={}, failed={}",
-                result2["enriched"],
-                result2["linked_to_our_db"],
-                result2["failed"],
+                "Enrichment done: enriched={}, citations={}, failed={}",
+                result["enriched"],
+                result["citations_added"],
+                result["failed"],
             )
         except Exception:
-            logger.exception("Citation enrichment error")
+            logger.exception("Enrichment error")
+
+    # 6. Citation DOI resolution
+    try:
+        result2 = await enrich_existing_citations(
+            client,
+            conn,
+            concurrency=3,
+            batch_size=100,
+        )
+        logger.info(
+            "Citation enrichment done: enriched={}, linked={}, failed={}",
+            result2["enriched"],
+            result2["linked_to_our_db"],
+            result2["failed"],
+        )
+    except Exception:
+        logger.exception("Citation enrichment error")
 
     # 7. Export
     try:
@@ -366,15 +451,10 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
     except Exception:
         logger.exception("Export error")
 
-    # Final checkpoint
-    _save_ckpt(ckpt)
-
-    conn.close()
-    logger.info("=== dergipark-miner finished ===")
-
 
 if __name__ == "__main__":
-    import asyncio
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
 
     parser = argparse.ArgumentParser(description="dergipark-miner: academic data mining tool")
     parser.add_argument(
@@ -383,4 +463,5 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=0, help="Max journals to process (0=unlimited, all articles fetched)")
     args = parser.parse_args()
 
-    asyncio.run(run(skip_enrich=args.skip_enrich, limit=args.limit))
+    with contextlib.suppress(KeyboardInterrupt, SystemExit):
+        asyncio.run(run(skip_enrich=args.skip_enrich, limit=args.limit))

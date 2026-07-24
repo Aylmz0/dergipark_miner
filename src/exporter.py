@@ -6,6 +6,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from loguru import logger
+
 
 def _normalize_doi(doi: str | None) -> str | None:
     if not doi:
@@ -60,6 +62,9 @@ def export_all_articles(
     Articles are sorted by journal slug, then by ID. Each line contains:
     {"slug": ..., "title": ..., "doi": ..., "date": ..., "authors": [...], "citations": [...]}
 
+    Per-row error handling: if a single article fails to build, it is skipped
+    and counted as failed. The export does not crash on bad data.
+
     Args:
         conn: SQLite connection (row_factory will be set to sqlite3.Row).
         output_path: Destination file path.
@@ -82,9 +87,17 @@ def export_all_articles(
         """
     ).fetchall()
 
+    succeeded = 0
+    failed = 0
     with open(output_path, "w", encoding="utf-8") as f:
         for article in articles:
-            row = _build_article_row(conn, dict(article))
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            try:
+                row = _build_article_row(conn, dict(article))
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                succeeded += 1
+            except Exception as exc:
+                failed += 1
+                logger.warning("Export skip article id={}: {}", article["id"], exc)
 
+    logger.info("Export: {} succeeded, {} failed", succeeded, failed)
     return output_path
