@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from exporter import export_all_journals, export_journal_json
+from exporter import export_all_journals, export_journal_json, export_journals_json
 from storage import init_db
 
 
@@ -162,3 +162,29 @@ def test_export_idempotent(tmp_path, conn):
     f2 = export_journal_json(conn, "ihad", tmp_path)
     content2 = f2.read_text(encoding="utf-8")
     assert content1 == content2
+
+
+def test_export_journals_json(tmp_path, conn):
+    _seed_db(conn)
+    out = export_journals_json(conn, tmp_path)
+    assert out.exists()
+    assert out.name == "journals.jsonl"
+    lines = out.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["short_name"] == "ihad"
+    assert row["name"] == "Islam Hukuku"
+    assert row["article_count"] == 2
+
+
+def test_export_journals_json_multiple(tmp_path, conn):
+    _seed_db(conn)
+    conn.execute(
+        "INSERT INTO journals (id, short_name, name) VALUES (2, 'tip', 'Tip Dergisi')"
+    )
+    conn.commit()
+    out = export_journals_json(conn, tmp_path)
+    lines = out.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    names = [json.loads(l)["short_name"] for l in lines]
+    assert names == ["ihad", "tip"]

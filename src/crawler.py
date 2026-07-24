@@ -32,44 +32,66 @@ OAI_METADATA_PREFIX = "oai_dc"
 DEFAULT_USER_AGENT = "dergipark-miner/0.1 (https://github.com/example/dergipark_miner)"
 
 
+def _extract_journals(html: str) -> list[dict]:
+    """HTML icindeki dergi linklerinden slug + full name cikarir.
+
+    DergiPark listeleme sayfasindaki dergi linkleri <h5> icindedir:
+        <h5><a href="/tr/pub/{slug}">Full Dergi Adi</a></h5>
+    Navigasyon linkleri (navbar, dropdown) filtrelenir.
+    """
+    tree = HTMLParser(html)
+    journals: dict[str, str] = {}
+    for h5 in tree.css("h5"):
+        for anchor in h5.css("a"):
+            href = anchor.attributes.get("href") or ""
+            if not href.startswith("/tr/pub/"):
+                continue
+            slug = href[len("/tr/pub/"):].strip("/")
+            if not slug or "/" in slug or slug.startswith("page"):
+                continue
+            name = (anchor.text() or "").strip()
+            if slug not in journals:
+                journals[slug] = name
+    return [{"short_name": s, "name": n} for s, n in sorted(journals.items())]
+
+
 def _extract_slugs(html: str) -> set[str]:
     """HTML icindeki dergi linklerinden (/tr/pub/{slug}) slug listesini cikarir."""
-    tree = HTMLParser(html)
-    slugs: set[str] = set()
-    for anchor in tree.css("a"):
-        href = anchor.attributes.get("href") or ""
-        if not href.startswith("/tr/pub/"):
-            continue
-        slug = href[len("/tr/pub/") :].strip("/")
-        if not slug or "/" in slug or slug.startswith("page"):
-            continue
-        slugs.add(slug)
-    return slugs
+    return {j["short_name"] for j in _extract_journals(html)}
 
 
 @retry(max_attempts=3, backoff=1.0)
-async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int = 5) -> list[str]:
-    """DergiPark dergi kesif sayfasini asenkron gezip dergi kisa adlarini (slug) toplar.
+async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 5) -> list[dict]:
+    """DergiPark dergi kesif sayfasini asenkron gezip dergi bilgilerini toplar.
 
     Fonksiyon disaridan bir httpx.AsyncClient alir; kendi client'ini uretmez.
     Sayfalar arasinda kisa bekleme yapar ve max_pages ile sinirlidir.
-    Sadece slug listesi (str) doner, dergi metadatasi parse ETMEZ.
+    Donus: [{short_name: "ihad", name: "Islam Hukuku..."}, ...]
     """
     setup_logger()
 
-    collected: set[str] = set()
+    collected: dict[str, str] = {}
     for page in range(1, max_pages + 1):
         url = DERGIPARK_JOURNALS_URL if page == 1 else f"{DERGIPARK_JOURNALS_URL}?page={page}"
         logger.info("Dergi listesi cekiliyor: {}", url)
         resp = await client.get(url, headers={"User-Agent": DEFAULT_USER_AGENT}, follow_redirects=True)
         resp.raise_for_status()
-        page_slugs = _extract_slugs(resp.text)
-        logger.info("Sayfa {}: {} dergi bulundu", page, len(page_slugs))
-        collected |= page_slugs
+        page_journals = _extract_journals(resp.text)
+        logger.info("Sayfa {}: {} dergi bulundu", page, len(page_journals))
+        for j in page_journals:
+            if j["short_name"] not in collected:
+                collected[j["short_name"]] = j["name"]
         if page < max_pages:
             await asyncio.sleep(random.uniform(1.0, 2.0))
 
-    return sorted(collected)
+    return [{"short_name": s, "name": n} for s, n in sorted(collected.items())]
+
+
+# backward compat alias
+async def fetch_journal_shortnames(client: httpx.AsyncClient, *, max_pages: int = 5) -> list[str]:
+    """fetch_journals'un eski arayuzu — sadece short_name listesi dondurur."""
+    journals = await fetch_journals(client, max_pages=max_pages)
+    return [j["short_name"] for j in journals]
 
 
 @retry(max_attempts=3, backoff=1.0)

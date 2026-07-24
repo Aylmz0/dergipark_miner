@@ -101,6 +101,17 @@ def _resolve_journal(conn: sqlite3.Connection, short_name: str, name: str = "") 
     return cur.lastrowid
 
 
+def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
+    """Tum dergileri toplu olarak DB'ye yazar/gunceller.
+
+    Her dergi icin short_name + name bilgisini kaydeder.
+    Mevcut dergiler atlanir, name bossa guncellenir.
+    """
+    for j in journals:
+        _resolve_journal(conn, j.get("short_name", ""), j.get("name", ""))
+    conn.commit()
+
+
 def insert_article(conn: sqlite3.Connection, article: dict) -> int:
     """GÖREV 5'in metadata dict'ini articles tablosuna yazar, article id'sini döndürür.
 

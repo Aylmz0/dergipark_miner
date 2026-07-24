@@ -13,6 +13,7 @@ from crawler import (
     download_pdf,
     fetch_article_pdf_url,
     fetch_journal_shortnames,
+    fetch_journals,
     harvest_all_journals,
     load_pdf_errors,
     log_pdf_error,
@@ -22,9 +23,15 @@ from crawler import (
 SAMPLE_HTML = """
 <html>
   <body>
-    <a href="/tr/pub/test-dergi">Test Dergi</a>
-    <a href="/tr/pub/page/faq">SSS</a>
-    <a href="/en/pub/baska">Baska</a>
+    <nav>
+      <a href="/tr/pub/page/faq">SSS</a>
+      <a href="/tr/pub/trends">Trendler</a>
+    </nav>
+    <table>
+      <tr><td>
+        <h5><a href="/tr/pub/test-dergi">Test Dergi</a></h5>
+      </td></tr>
+    </table>
   </body>
 </html>
 """
@@ -60,6 +67,27 @@ def test_fetch_journal_shortnames_extracts_slug():
 async def _run(transport: httpx.MockTransport) -> list[str]:
     async with httpx.AsyncClient(transport=transport) as client:
         return await fetch_journal_shortnames(client, max_pages=1)
+
+
+async def _run_journals(transport: httpx.MockTransport) -> list[dict]:
+    async with httpx.AsyncClient(transport=transport) as client:
+        return await fetch_journals(client, max_pages=1)
+
+
+def test_fetch_journals_returns_dicts():
+    transport = httpx.MockTransport(_mock_handler)
+    journals = asyncio.run(_run_journals(transport))
+    assert isinstance(journals, list)
+    assert all(isinstance(j, dict) for j in journals)
+    assert all("short_name" in j and "name" in j for j in journals)
+
+
+def test_fetch_journals_extracts_name():
+    transport = httpx.MockTransport(_mock_handler)
+    journals = asyncio.run(_run_journals(transport))
+    test_derji = [j for j in journals if j["short_name"] == "test-dergi"]
+    assert len(test_derji) == 1
+    assert test_derji[0]["name"] == "Test Dergi"
 
 
 _conc = {"current": 0, "max": 0, "lock": threading.Lock()}

@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import pytest
 
-from storage import init_db, insert_article
+from storage import init_db, insert_article, insert_journals
 
 
 @pytest.fixture
@@ -172,3 +172,35 @@ def test_insert_article_enriches_existing_journal_name(conn):
 
     row = conn.execute("SELECT name FROM journals WHERE short_name = 'j1'").fetchone()
     assert row[0] == "Yeni Dergi Adi"
+
+
+# ---------------------------------------------------------------------------
+# insert_journals tests
+# ---------------------------------------------------------------------------
+
+def test_insert_journals_adds_new_journals(conn):
+    journals = [
+        {"short_name": "j1", "name": "Dergi Bir"},
+        {"short_name": "j2", "name": "Dergi Iki"},
+    ]
+    insert_journals(conn, journals)
+    rows = conn.execute("SELECT short_name, name FROM journals ORDER BY short_name").fetchall()
+    assert len(rows) == 2
+    assert rows[0] == ("j1", "Dergi Bir")
+    assert rows[1] == ("j2", "Dergi Iki")
+
+
+def test_insert_journals_skips_existing(conn):
+    conn.execute("INSERT INTO journals (short_name, name) VALUES ('j1', 'Eski Ad')")
+    conn.commit()
+    insert_journals(conn, [{"short_name": "j1", "name": "Yeni Ad"}])
+    row = conn.execute("SELECT name FROM journals WHERE short_name = 'j1'").fetchone()
+    assert row[0] == "Eski Ad"
+
+
+def test_insert_journals_fills_empty_name(conn):
+    conn.execute("INSERT INTO journals (short_name, name) VALUES ('j1', '')")
+    conn.commit()
+    insert_journals(conn, [{"short_name": "j1", "name": "Dolugu Isim"}])
+    row = conn.execute("SELECT name FROM journals WHERE short_name = 'j1'").fetchone()
+    assert row[0] == "Dolugu Isim"

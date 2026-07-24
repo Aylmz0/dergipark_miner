@@ -105,3 +105,39 @@ def export_all_journals(
         path = export_journal_json(conn, short_name, output_dir)
         files.append(path)
     return files
+
+
+def export_journals_json(
+    conn: sqlite3.Connection,
+    output_dir: str | Path,
+) -> Path:
+    """Tum dergileri tek bir JSONL dosyasi olarak disa aktarir.
+
+    Her satir: {short_name, name, article_count}
+    Returns:
+        Olusturulan dosya yolu.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = output_dir / "journals.jsonl"
+
+    rows = conn.execute(
+        """
+        SELECT j.short_name, j.name, COUNT(a.id) AS article_count
+        FROM journals j
+        LEFT JOIN articles a ON a.journal_id = j.id
+        GROUP BY j.id
+        ORDER BY j.short_name
+        """
+    ).fetchall()
+
+    with open(out_file, "w", encoding="utf-8") as f:
+        for short_name, name, article_count in rows:
+            row = {
+                "short_name": short_name,
+                "name": name or "",
+                "article_count": article_count,
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    return out_file
