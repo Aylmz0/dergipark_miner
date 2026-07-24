@@ -204,3 +204,38 @@ def test_insert_journals_fills_empty_name(conn):
     insert_journals(conn, [{"short_name": "j1", "name": "Dolugu Isim"}])
     row = conn.execute("SELECT name FROM journals WHERE short_name = 'j1'").fetchone()
     assert row[0] == "Dolugu Isim"
+
+
+def test_insert_article_content_hash_dedup(conn):
+    """DOI ve OAI ID yoksa content_hash ile dedup yapilir."""
+    article = {
+        "title": "Ayni Baslik",
+        "doi": "",
+        "authors": [],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "testjournal",
+        "oai_identifier": "",
+    }
+    id1 = insert_article(conn, article)
+    id2 = insert_article(conn, article)
+    assert id1 == id2  # ayni makale, ayni id
+
+    total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    assert total == 1
+
+
+def test_insert_article_content_hash_different(conn):
+    """Farkli baslik = farkli content_hash = farkli makale."""
+    base = {
+        "doi": "",
+        "authors": [],
+        "publication_date": "2024-01-01",
+        "journal_shortname": "testjournal",
+        "oai_identifier": "",
+    }
+    id1 = insert_article(conn, {**base, "title": "Makale Bir"})
+    id2 = insert_article(conn, {**base, "title": "Makale Iki"})
+    assert id1 != id2
+
+    total = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    assert total == 2

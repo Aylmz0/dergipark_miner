@@ -56,11 +56,6 @@ def _extract_journals(html: str) -> list[dict]:
     return [{"short_name": s, "name": n} for s, n in sorted(journals.items())]
 
 
-def _extract_slugs(html: str) -> set[str]:
-    """HTML icindeki dergi linklerinden (/tr/pub/{slug}) slug listesini cikarir."""
-    return {j["short_name"] for j in _extract_journals(html)}
-
-
 @retry(max_attempts=3, backoff=1.0)
 async def fetch_journals(client: httpx.AsyncClient, *, max_pages: int = 1000) -> list[dict]:
     """DergiPark dergi kesif sayfasini asenkron gezip dergi bilgilerini toplar.

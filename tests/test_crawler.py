@@ -431,3 +431,27 @@ def test_remove_pdf_error(tmp_path, monkeypatch):
     assert len(errors) == 1
     assert errors[0]["oai_id"] == "oai:test:2"
 
+
+def test_log_pdf_error_transient_no_increment(tmp_path, monkeypatch):
+    """Gecici hatalarda retry_count artirilmaz."""
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "429 Too Many", is_transient=True)
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "429 Too Many", is_transient=True)
+    errors = load_pdf_errors()
+    assert errors[0]["retry_count"] == 0  # artmadi
+
+
+def test_log_pdf_error_permanent_increments(tmp_path, monkeypatch):
+    """Kalici hatalarda retry_count artar."""
+    monkeypatch.chdir(tmp_path)
+    from crawler import PDF_ERRORS_PATH
+    PDF_ERRORS_PATH.unlink(missing_ok=True)
+
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
+    log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
+    errors = load_pdf_errors()
+    assert errors[0]["retry_count"] == 2
+
