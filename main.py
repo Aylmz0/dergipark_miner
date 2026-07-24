@@ -34,7 +34,7 @@ from src.crawler import (  # noqa: E402
     remove_pdf_error,
 )
 from src.enrich import enrich_all_articles, enrich_existing_citations  # noqa: E402
-from src.exporter import export_all_journals, export_journals_json  # noqa: E402
+from src.exporter import export_all_articles  # noqa: E402
 from src.storage import init_db, insert_article, insert_journals  # noqa: E402
 from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger  # noqa: E402
 
@@ -270,9 +270,8 @@ async def run(skip_enrich: bool = False, limit: int = 0):
 
     # 7. Export
     try:
-        export_all_journals(conn, Path("data/exports"))
-        export_journals_json(conn, Path("data/exports"))
-        logger.info("Export tamamlandi: data/exports/")
+        export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
+        logger.info("Export tamamlandi: data/exports/all_articles.jsonl")
     except Exception:
         logger.exception("Export hatasi")
 
