@@ -137,6 +137,8 @@ async def harvest_all_journals(
     inter_request_delay: float = 1.5,
     adaptive_delay: AdaptiveDelay | None = None,
     on_journal_done: Callable[[str, list[str], bool], None] | None = None,
+    on_page_done: Callable[[str, str, int], None] | None = None,
+    resume_tokens: dict[str, str] | None = None,
 ) -> dict[str, list[str]] | None:
     """Harvest OAI-PMH ListRecords XML for all journals concurrently.
 
@@ -151,6 +153,8 @@ async def harvest_all_journals(
         inter_request_delay: Base delay between requests in seconds (+/- 30% jitter).
         adaptive_delay: AdaptiveDelay instance for 429 backoff.
         on_journal_done: Callback invoked as on_journal_done(shortname, xml_pages, success).
+        on_page_done: Callback after each page: on_page_done(shortname, token, collected).
+        resume_tokens: Dict mapping shortname to resumption token for resume.
 
     Returns:
         Dict mapping shortname to list of XML page strings (streaming mode returns None).
@@ -170,7 +174,15 @@ async def harvest_all_journals(
             await asyncio.sleep(random.uniform(delay * 0.7, delay * 1.3))
 
             initial_url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&metadataPrefix={OAI_METADATA_PREFIX}"
-            url = initial_url
+
+            # Resume from saved token if available
+            saved_token = (resume_tokens or {}).get(shortname, "")
+            if saved_token:
+                url = f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={saved_token}"
+                logger.debug("Journal '{}' resuming from saved token", shortname)
+            else:
+                url = initial_url
+
             collected_records = 0
             token_restarts = 0
             max_token_restarts = 3
@@ -213,6 +225,9 @@ async def harvest_all_journals(
                     url = (
                         f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={token}"
                     )
+                    # Persist token for crash recovery
+                    if on_page_done:
+                        on_page_done(shortname, token, collected_records)
                 harvest_success = True
             except Exception as exc:  # Permanent error after retry
                 if adaptive_delay and "429" in str(exc):
@@ -457,7 +472,9 @@ def scrape_article_html_metadata(html: str) -> dict:
             result["pages"] = content
         elif name == "citation_pdf_url":
             result["pdf_url"] = content
-        elif (name == "citation_journal_title" or name == "dc.source") and not result["journal_title"]:
+        elif (name == "citation_journal_title" or name == "dc.source") and not result[
+            "journal_title"
+        ]:
             result["journal_title"] = content
 
     return result
@@ -591,17 +608,20 @@ def log_pdf_error(oai_id: str, article_url: str, error: str, is_transient: bool 
     save_pdf_errors(errors)
 
 
-def is_permanently_failed(oai_id: str, max_retries: int = 3) -> bool:
+def is_permanently_failed(
+    oai_id: str, max_retries: int = 3, cache: list[dict] | None = None
+) -> bool:
     """Check if an article has exceeded the maximum retry count.
 
     Args:
         oai_id: OAI identifier of the article.
         max_retries: Maximum allowed retry attempts.
+        cache: Pre-loaded pdf_errors list (avoids repeated disk reads).
 
     Returns:
         True if retry_count >= max_retries.
     """
-    errors = load_pdf_errors()
+    errors = cache if cache is not None else load_pdf_errors()
     entry = next((e for e in errors if e.get("oai_id") == oai_id), None)
     if not entry:
         return False

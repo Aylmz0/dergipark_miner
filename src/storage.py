@@ -178,6 +178,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_hash ON articles(content_hash)")
 
     conn.commit()
     return conn
@@ -226,7 +227,6 @@ def update_journal_article_count(conn: sqlite3.Connection, short_name: str, coun
         "UPDATE journals SET article_count = ? WHERE short_name = ?",
         (count, short_name),
     )
-    conn.commit()
 
 
 def insert_journals(conn: sqlite3.Connection, journals: list[dict]) -> None:
@@ -301,8 +301,17 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                     oai_identifier=?, abstract=?, keywords=?, language=?
                 WHERE id=?
                 """,
-                (journal_id, title, doi, publication_date, oai_identifier,
-                 abstract, _json_dumps(keywords), language, article_id),
+                (
+                    journal_id,
+                    title,
+                    doi,
+                    publication_date,
+                    oai_identifier,
+                    abstract,
+                    _json_dumps(keywords),
+                    language,
+                    article_id,
+                ),
             )
 
     # 2. Find by DOI
@@ -317,8 +326,16 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                     abstract=?, keywords=?, language=?
                 WHERE id=?
                 """,
-                (journal_id, title, publication_date, oai_identifier,
-                 abstract, _json_dumps(keywords), language, article_id),
+                (
+                    journal_id,
+                    title,
+                    publication_date,
+                    oai_identifier,
+                    abstract,
+                    _json_dumps(keywords),
+                    language,
+                    article_id,
+                ),
             )
 
     # 3. Find by content hash (when no DOI or OAI ID)
@@ -341,13 +358,21 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
                                   content_hash, abstract, keywords, language)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (journal_id, title, doi, publication_date, oai_identifier,
-             content_hash, abstract, _json_dumps(keywords), language),
+            (
+                journal_id,
+                title,
+                doi,
+                publication_date,
+                oai_identifier,
+                content_hash,
+                abstract,
+                _json_dumps(keywords),
+                language,
+            ),
         )
         article_id = cur.lastrowid
 
     _write_authors(conn, article_id, authors)
-    conn.commit()
     return article_id
 
 
@@ -368,6 +393,3 @@ def _write_authors(conn: sqlite3.Connection, article_id: int, authors: list) -> 
             "INSERT INTO authors (article_id, name) VALUES (?, ?)",
             (article_id, name),
         )
-
-
-

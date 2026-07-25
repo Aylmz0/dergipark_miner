@@ -1,13 +1,12 @@
 """Dergipark-miner main orchestrator.
 
 Pipeline: discover journals -> OAI-PMH harvest -> parse -> SQLite ->
-PDF download + HTML metadata -> OpenAlex is_oa -> JSONL export.
+PDF download + HTML metadata (is_oa from citation_pdf_url) -> JSONL export.
 
 Resumes from checkpoint. Handles Ctrl+C gracefully.
 
 Usage:
     python main.py                  # full pipeline
-    python main.py --skip-enrich    # skip OpenAlex is_oa enrichment
     python main.py --limit 50       # max 50 journals
     python main.py --limit 0        # unlimited journals
 """
@@ -37,7 +36,6 @@ from src.crawler import (
     remove_pdf_error,
     scrape_article_html_metadata,
 )
-from src.enrich import enrich_all_articles
 from src.exporter import export_all_articles
 from src.storage import init_db, insert_article, insert_journals, update_journal_article_count
 from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger
@@ -103,10 +101,24 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
     if not cur:
         return
 
-    (cur_abstract, cur_keywords, cur_language, cur_journal_title, cur_issn,
-     cur_publisher, cur_volume, cur_issue, cur_firstpage, cur_lastpage,
-     cur_pages, cur_pdf_url, cur_orcid, cur_article_type, cur_references,
-     cur_metadata) = cur
+    (
+        cur_abstract,
+        cur_keywords,
+        cur_language,
+        cur_journal_title,
+        cur_issn,
+        cur_publisher,
+        cur_volume,
+        cur_issue,
+        cur_firstpage,
+        cur_lastpage,
+        cur_pages,
+        cur_pdf_url,
+        cur_orcid,
+        cur_article_type,
+        cur_references,
+        cur_metadata,
+    ) = cur
 
     updates: list[str] = []
     params: list = []
@@ -141,6 +153,10 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
             updates.append("metadata = ?")
             params.append(json.dumps(meta, ensure_ascii=False))
 
+    # is_oa: DergiPark is always open access when citation_pdf_url exists
+    if html_meta.get("pdf_url"):
+        updates.append("is_oa = 1")
+
     if updates:
         params.append(article_id)
         conn.execute(
@@ -150,7 +166,7 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
         conn.commit()
 
 
-async def run(skip_enrich: bool = False, limit: int = 0) -> None:
+async def run(limit: int = 0) -> None:
     """Run the full mining pipeline."""
     global _shutdown_requested
     _shutdown_requested = False
@@ -198,7 +214,6 @@ async def run(skip_enrich: bool = False, limit: int = 0) -> None:
                 processed_articles=processed_articles,
                 pdf_downloaded=pdf_downloaded,
                 pdf_failed=pdf_failed,
-                skip_enrich=skip_enrich,
                 limit=limit,
             )
         except KeyboardInterrupt:
@@ -223,7 +238,6 @@ async def _run_pipeline(
     processed_articles: int,
     pdf_downloaded: int,
     pdf_failed: int,
-    skip_enrich: bool,
     limit: int,
 ) -> None:
     """Core pipeline logic. Can be interrupted gracefully."""
@@ -276,7 +290,7 @@ async def _run_pipeline(
 
     def on_journal_done(shortname: str, xml_pages: list[str], success: bool = True) -> None:
         """Called when each journal harvest completes: parse XML and write to DB."""
-        nonlocal processed_articles
+        nonlocal processed_articles, failed_articles
         journal_article_count = 0
         for xml_text in xml_pages:
             for record_xml in _split_records(xml_text):
@@ -288,18 +302,29 @@ async def _run_pipeline(
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
 
+        # Trim failed_articles (keep checkpoint size small)
+        if len(failed_articles) > 100:
+            failed_articles = failed_articles[-100:]
+
+        # Batch commit: one fsync per journal instead of per article
+        conn.commit()
+
         if success and xml_pages:
             # Harvest completed successfully — mark as processed
             processed_shortnames.append(shortname)
             if shortname in failed_journals:
                 del failed_journals[shortname]
+            # Clear resume token (no longer needed)
+            resume_tokens.pop(shortname, None)
             # Store per-journal article count
             update_journal_article_count(conn, shortname, journal_article_count)
         else:
             # Harvest failed or returned no data — NOT added to processed_shortnames
             # Will be retried on next run
             if shortname not in failed_journals:
-                failed_journals[shortname] = "harvest failed" if not success else "no records returned"
+                failed_journals[shortname] = (
+                    "harvest failed" if not success else "no records returned"
+                )
 
         ckpt.update(
             {
@@ -308,8 +333,18 @@ async def _run_pipeline(
                 "failed_journals": failed_journals,
                 "failed_articles": failed_articles,
                 "adaptive_delays": adaptive_delay.to_dict(),
+                "resume_tokens": resume_tokens,
             }
         )
+        _save_ckpt(ckpt)
+
+    # Resume tokens for crash recovery
+    resume_tokens: dict[str, str] = ckpt.get("resume_tokens", {})
+
+    def on_page_done(shortname: str, token: str, collected: int) -> None:
+        """Save resumption token after each page for crash recovery."""
+        resume_tokens[shortname] = token
+        ckpt["resume_tokens"] = resume_tokens
         _save_ckpt(ckpt)
 
     try:
@@ -321,6 +356,8 @@ async def _run_pipeline(
             inter_request_delay=2.0,
             adaptive_delay=adaptive_delay,
             on_journal_done=on_journal_done,
+            on_page_done=on_page_done,
+            resume_tokens=resume_tokens,
         )
         logger.info("Harvest done: {} articles total", processed_articles)
     except Exception:
@@ -342,26 +379,25 @@ async def _run_pipeline(
 
     # 4. PDF indirme (rate-limit aware: adaptive delay between downloads)
     try:
-        articles = conn.execute(
+        # Streaming cursor: fetch in batches, not all at once
+        _pdf_cursor = conn.execute(
             """
             SELECT a.id, a.oai_identifier, j.short_name
             FROM articles a
             JOIN journals j ON a.journal_id = j.id
             """
-        ).fetchall()
+        )
 
         pdf_checkpoint_interval = 25
         pdf_counter = 0
         pdf_delay = 1.5
+        pdf_errors_cache = load_pdf_errors()
 
-        async def _download_one(
-            oai_id: str, journal: str, pdf_path: Path
-        ) -> tuple[bool, bool]:
+        async def _download_one(oai_id: str, journal: str, pdf_path: Path) -> tuple[bool, bool]:
             """Download a single PDF with immediate retry on transient errors."""
             nonlocal pdf_delay
             article_url = (
-                f"https://dergipark.org.tr/tr/pub/{journal}/article/"
-                f"{oai_id.split('/')[-1]}"
+                f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
             )
             max_immediate_retries = 3
             for attempt in range(max_immediate_retries):
@@ -376,6 +412,7 @@ async def _run_pipeline(
 
                     # Extract PDF URL from HTML
                     from selectolax.parser import HTMLParser as _HP
+
                     tree = _HP(resp.text)
                     best: str | None = None
                     best_priority = 999
@@ -416,7 +453,9 @@ async def _run_pipeline(
                             wait = pdf_delay * (attempt + 1)
                             logger.warning(
                                 "429 on PDF (attempt {}/{}), retry in {:.1f}s",
-                                attempt + 1, max_immediate_retries, wait,
+                                attempt + 1,
+                                max_immediate_retries,
+                                wait,
                             )
                             await asyncio.sleep(wait)
                             continue
@@ -441,10 +480,9 @@ async def _run_pipeline(
             await asyncio.sleep(pdf_delay)
 
         # Retry previously failed PDFs first
-        pdf_errors = load_pdf_errors()
-        for entry in pdf_errors[:]:
+        for entry in pdf_errors_cache[:]:
             oai_id = entry.get("oai_id", "")
-            if is_permanently_failed(oai_id, max_retries=5):
+            if is_permanently_failed(oai_id, max_retries=5, cache=pdf_errors_cache):
                 continue
             row = conn.execute(
                 "SELECT a.id, j.short_name FROM articles a "
@@ -459,17 +497,21 @@ async def _run_pipeline(
             pdf_path = Path("data/raw_pdfs") / safe_name
             await _do_download(oai_id, journal, pdf_path)
 
-        # Then normal download
-        for _article_id, oai_id, journal in articles:
-            if not oai_id:
-                continue
-            safe_name = oai_id.replace("/", "_") + ".pdf"
-            pdf_path = Path("data/raw_pdfs") / safe_name
-            if pdf_path.exists():
-                continue
-            if is_permanently_failed(oai_id, max_retries=5):
-                continue
-            await _do_download(oai_id, journal, pdf_path)
+        # Then normal download (streaming cursor)
+        while True:
+            batch = _pdf_cursor.fetchmany(500)
+            if not batch:
+                break
+            for _article_id, oai_id, journal in batch:
+                if not oai_id:
+                    continue
+                safe_name = oai_id.replace("/", "_") + ".pdf"
+                pdf_path = Path("data/raw_pdfs") / safe_name
+                if pdf_path.exists():
+                    continue
+                if is_permanently_failed(oai_id, max_retries=5, cache=pdf_errors_cache):
+                    continue
+                await _do_download(oai_id, journal, pdf_path)
 
         ckpt["pdf_downloaded"] = pdf_downloaded
         ckpt["pdf_failed"] = pdf_failed
@@ -480,10 +522,13 @@ async def _run_pipeline(
         for retry_round in range(1, 4):
             if _shutdown_requested:
                 break
-            pdf_errors = load_pdf_errors()
+            pdf_errors_cache = load_pdf_errors()  # Reload after each round
             retry_candidates = [
-                e for e in pdf_errors
-                if not is_permanently_failed(e.get("oai_id", ""), max_retries=5)
+                e
+                for e in pdf_errors_cache
+                if not is_permanently_failed(
+                    e.get("oai_id", ""), max_retries=5, cache=pdf_errors_cache
+                )
                 and e.get("retry_count", 0) < 5
             ]
             if not retry_candidates:
@@ -518,34 +563,7 @@ async def _run_pipeline(
 
     _check_shutdown()
 
-    # 5. OpenAlex zenginlestirme
-    if skip_enrich:
-        logger.info("OpenAlex enrichment skipped (--skip-enrich)")
-    else:
-
-        def on_enrich_batch(done, failed):
-            ckpt["enriched_count"] = done
-            _save_ckpt(ckpt)
-
-        try:
-            result = await enrich_all_articles(
-                client,
-                conn,
-                concurrency=3,
-                batch_size=50,
-                on_batch_done=on_enrich_batch,
-            )
-            ckpt["enriched_count"] = result["enriched"]
-            _save_ckpt(ckpt)
-            logger.info(
-                "Enrichment done: enriched={}, failed={}",
-                result["enriched"],
-                result["failed"],
-            )
-        except Exception:
-            logger.exception("Enrichment error")
-
-    # 6. Export
+    # 5. Export
     try:
         export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
         logger.info("Export done: data/exports/all_articles.jsonl")
@@ -559,10 +577,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="dergipark-miner: academic data mining tool")
     parser.add_argument(
-        "--skip-enrich", action="store_true", help="Skip OpenAlex enrichment"
+        "--limit",
+        type=int,
+        default=0,
+        help="Max journals to process (0=unlimited, all articles fetched)",
     )
-    parser.add_argument("--limit", type=int, default=0, help="Max journals to process (0=unlimited, all articles fetched)")
     args = parser.parse_args()
 
     with contextlib.suppress(KeyboardInterrupt, SystemExit):
-        asyncio.run(run(skip_enrich=args.skip_enrich, limit=args.limit))
+        asyncio.run(run(limit=args.limit))

@@ -30,59 +30,11 @@ def _json_loads(text: str | None) -> list | dict:
     try:
         result = json.loads(text)
         return result if isinstance(result, (list, dict)) else []
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return []
 
 
-def _build_article_row(conn: sqlite3.Connection, article: dict) -> dict:
-    """Build a JSONL row dict for one article with authors.
-
-    Args:
-        conn: SQLite connection.
-        article: Dict with article fields (id, title, doi, etc.).
-
-    Returns:
-        Dict ready for JSON serialization.
-    """
-    authors = [
-        r[0]
-        for r in conn.execute(
-            "SELECT name FROM authors WHERE article_id = ? ORDER BY id",
-            (article["id"],),
-        ).fetchall()
-    ]
-
-    oai_id = article.get("oai_identifier") or ""
-    slug = article["journal_short"]
-    article_number = oai_id.split("/")[-1] if "/" in oai_id else ""
-    url = f"https://dergipark.org.tr/tr/pub/{slug}/article/{article_number}" if article_number else ""
-
-    return {
-        "slug": slug,
-        "article_id": oai_id,
-        "article_url": url,
-        "title": article["title"],
-        "authors": authors,
-        "journal_title": article.get("journal_title") or "",
-        "issn": article.get("issn") or "",
-        "publisher": article.get("publisher") or "",
-        "volume": article.get("volume") or "",
-        "issue": article.get("issue") or "",
-        "firstpage": article.get("firstpage") or "",
-        "lastpage": article.get("lastpage") or "",
-        "pages": article.get("pages") or "",
-        "date": article["publication_date"],
-        "language": article.get("language") or "",
-        "doi": _normalize_doi(article["doi"]),
-        "abstract": article.get("abstract") or "",
-        "is_oa": bool(article.get("is_oa")),
-        "pdf_url": article.get("pdf_url") or None,
-        "keywords": _json_loads(article.get("keywords")),
-        "orcid": _json_loads(article.get("orcid")),
-        "article_type": article.get("article_type") or "",
-        "references": _json_loads(article.get("references")),
-        "metadata": _json_loads(article.get("metadata")),
-    }
+_FETCH_SIZE = 1000
 
 
 def export_all_articles(
@@ -91,17 +43,10 @@ def export_all_articles(
 ) -> Path:
     """Export all articles to a single JSONL file.
 
-    Articles are sorted by journal slug, then by ID. Each line contains
-    all metadata fields: slug, article_id, article_url, title, authors,
-    journal_title, issn, publisher, volume, issue, firstpage, lastpage,
-    pages, date, language, doi, abstract, is_oa, pdf_url, keywords,
-    orcid, article_type, references, metadata.
-
-    Per-row error handling: if a single article fails to build, it is skipped
-    and counted as failed. The export does not crash on bad data.
+    Uses streaming cursor with fetchmany() + single JOIN query (no N+1).
 
     Args:
-        conn: SQLite connection (row_factory will be set to sqlite3.Row).
+        conn: SQLite connection.
         output_path: Destination file path.
 
     Returns:
@@ -110,33 +55,86 @@ def export_all_articles(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn.row_factory = sqlite3.Row
+    conn.row_factory = None
 
-    articles = conn.execute(
+    # Single query: authors aggregated via GROUP_CONCAT (no N+1)
+    cursor = conn.execute(
         """
         SELECT a.id, a.title, a.doi, a.publication_date,
                a.oai_identifier, a.abstract, a.keywords, a.language,
                a.journal_title, a.issn, a.publisher, a.volume, a.issue,
                a.firstpage, a.lastpage, a.pages, a.pdf_url,
-               a.orcid, a.article_type, a.[references], a.metadata, a.is_oa,
-               j.short_name AS journal_short
+               a.orcid, a.article_type, a.[references], a.is_oa,
+               j.short_name,
+               GROUP_CONCAT(au.name, '||') AS author_names
         FROM articles a
         JOIN journals j ON a.journal_id = j.id
+        LEFT JOIN authors au ON au.article_id = a.id
+        GROUP BY a.id
         ORDER BY j.short_name, a.id
         """
-    ).fetchall()
+    )
 
     succeeded = 0
     failed = 0
     with open(output_path, "w", encoding="utf-8") as f:
-        for article in articles:
-            try:
-                row = _build_article_row(conn, dict(article))
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                succeeded += 1
-            except Exception as exc:
-                failed += 1
-                logger.warning("Export skip article id={}: {}", article["id"], exc)
+        while True:
+            batch = cursor.fetchmany(_FETCH_SIZE)
+            if not batch:
+                break
+            for article in batch:
+                try:
+                    authors = [n for n in (article[22] or "").split("||") if n]
+                    row = _build_row(article, authors)
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    succeeded += 1
+                except Exception as exc:
+                    failed += 1
+                    logger.warning("Export skip article id={}: {}", article[0], exc)
 
     logger.info("Export: {} succeeded, {} failed", succeeded, failed)
     return output_path
+
+
+def _build_row(article: tuple, authors: list[str]) -> dict:
+    """Build a JSONL row dict from a raw cursor row + authors.
+
+    Args:
+        article: Tuple from SELECT query.
+        authors: Pre-aggregated author name list.
+
+    Returns:
+        Dict ready for JSON serialization.
+    """
+    oai_id = article[4] or ""
+    slug = article[21]
+    article_number = oai_id.split("/")[-1] if "/" in oai_id else ""
+    url = (
+        f"https://dergipark.org.tr/tr/pub/{slug}/article/{article_number}" if article_number else ""
+    )
+
+    return {
+        "slug": slug,
+        "article_id": oai_id,
+        "article_url": url,
+        "title": article[1],
+        "authors": authors,
+        "journal_title": article[8] or "",
+        "issn": article[9] or "",
+        "publisher": article[10] or "",
+        "volume": article[11] or "",
+        "issue": article[12] or "",
+        "firstpage": article[13] or "",
+        "lastpage": article[14] or "",
+        "pages": article[15] or "",
+        "date": article[3],
+        "language": article[7] or "",
+        "doi": _normalize_doi(article[2]),
+        "abstract": article[5] or "",
+        "keywords": _json_loads(article[6]),
+        "is_oa": bool(article[20]),
+        "pdf_url": article[16] or None,
+        "orcid": _json_loads(article[17]),
+        "article_type": article[18] or "",
+        "references": _json_loads(article[19]),
+    }

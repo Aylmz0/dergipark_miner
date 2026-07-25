@@ -30,9 +30,7 @@ def test_insert_article_roundtrip(conn):
     assert row[1] == "10.29228/ihad.12345"
     assert row[2] == "2022-01-14"
 
-    journal = conn.execute(
-        "SELECT short_name FROM journals WHERE id = ?", (row[3],)
-    ).fetchone()
+    journal = conn.execute("SELECT short_name FROM journals WHERE id = ?", (row[3],)).fetchone()
     assert journal[0] == "ihad"
 
 
@@ -49,9 +47,9 @@ def test_insert_article_upsert_by_doi(conn):
     second_id = insert_article(conn, updated)
 
     assert first_id == second_id
-    count = conn.execute(
-        "SELECT COUNT(*) FROM articles WHERE doi = ?", (base["doi"],)
-    ).fetchone()[0]
+    count = conn.execute("SELECT COUNT(*) FROM articles WHERE doi = ?", (base["doi"],)).fetchone()[
+        0
+    ]
     assert count == 1
     row = conn.execute(
         "SELECT title, publication_date FROM articles WHERE id = ?", (second_id,)
@@ -143,9 +141,7 @@ def test_insert_article_writes_journal_name(conn):
     }
     insert_article(conn, article)
 
-    row = conn.execute(
-        "SELECT name FROM journals WHERE short_name = 'ihad'"
-    ).fetchone()
+    row = conn.execute("SELECT name FROM journals WHERE short_name = 'ihad'").fetchone()
     assert row[0] == "Islam Hukuku Arastirmalari Dergisi"
 
 
@@ -172,6 +168,7 @@ def test_insert_article_enriches_existing_journal_name(conn):
 # ---------------------------------------------------------------------------
 # insert_journals tests
 # ---------------------------------------------------------------------------
+
 
 def test_insert_journals_adds_new_journals(conn):
     journals = [

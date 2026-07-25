@@ -101,9 +101,7 @@ def test_harvest_all_journals_returns_all_and_respects_concurrency():
     shortnames = ["dergi-a", "dergi-b", "dergi-c"]
     transport = httpx.MockTransport(_oai_handler)
 
-    result: dict[str, list[str]] = asyncio.run(
-        _harvest(transport, shortnames, concurrency=2)
-    )
+    result: dict[str, list[str]] = asyncio.run(_harvest(transport, shortnames, concurrency=2))
 
     assert set(result.keys()) == set(shortnames)
     for name in shortnames:
@@ -157,9 +155,7 @@ def test_harvest_follows_resumption_token():
     _call_log.clear()
     transport = httpx.MockTransport(_resumption_handler)
 
-    result: dict[str, list[str]] = asyncio.run(
-        _harvest(transport, ["dergi-x"], concurrency=1)
-    )
+    result: dict[str, list[str]] = asyncio.run(_harvest(transport, ["dergi-x"], concurrency=1))
 
     pages = result["dergi-x"]
     assert len(pages) == 2
@@ -297,6 +293,7 @@ def test_parse_article_metadata_source_has_pub_slug():
 # download_pdf tests
 # ---------------------------------------------------------------------------
 
+
 def test_download_pdf_writes_file(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"%PDF-1.4 fake content")
@@ -324,9 +321,11 @@ def test_download_pdf_handles_error(tmp_path):
 # PDF error logging tests
 # ---------------------------------------------------------------------------
 
+
 def test_log_pdf_error_and_load(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
@@ -339,6 +338,7 @@ def test_log_pdf_error_and_load(tmp_path, monkeypatch):
 def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404")
@@ -351,6 +351,7 @@ def test_log_pdf_error_no_duplicates(tmp_path, monkeypatch):
 def test_is_permanently_failed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     assert is_permanently_failed("oai:test:1", max_retries=3) is False
@@ -364,6 +365,7 @@ def test_is_permanently_failed(tmp_path, monkeypatch):
 def test_remove_pdf_error(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/1.pdf", "err1")
@@ -380,6 +382,7 @@ def test_log_pdf_error_transient_no_increment(tmp_path, monkeypatch):
     """Transient errors do not increment retry_count."""
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "429 Too Many", is_transient=True)
@@ -392,6 +395,7 @@ def test_log_pdf_error_permanent_increments(tmp_path, monkeypatch):
     """Permanent errors increment retry_count."""
     monkeypatch.chdir(tmp_path)
     from src.crawler import PDF_ERRORS_PATH
+
     PDF_ERRORS_PATH.unlink(missing_ok=True)
 
     log_pdf_error("oai:test:1", "https://example.com/paper.pdf", "404 Not Found")
@@ -475,4 +479,3 @@ def test_scrape_article_html_metadata_citation_issn_fallback():
     </head><body></body></html>"""
     result = scrape_article_html_metadata(html)
     assert result["issn"] == "9999-0000"
-
