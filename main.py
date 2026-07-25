@@ -270,11 +270,11 @@ async def _run_pipeline(
             len(remaining),
         )
 
-    # Adaptive delay tracker
+    # Adaptive delay tracker (shared for OAI-PMH + PDF)
     adaptive_delay = AdaptiveDelay(
         default=2.0,
-        min_delay=0.5,
-        max_delay=30.0,
+        min_delay=2.0,
+        max_delay=60.0,
         backoff_factor=2.0,
         decay_factor=0.9,
     )
@@ -288,11 +288,14 @@ async def _run_pipeline(
         logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
     max_per_journal = 999999
 
-    def on_journal_done(shortname: str, xml_pages: list[str], success: bool = True) -> None:
-        """Called when each journal harvest completes: parse XML and write to DB."""
+    def on_journal_done(
+        shortname: str, xml_pages: list[str], success: bool = True, flushed_count: int = 0
+    ) -> None:
+        """Called when each journal harvest completes: process remaining pages + export."""
         nonlocal processed_articles, failed_articles
+        # Only process pages not yet flushed by on_page_done
         journal_article_count = 0
-        for xml_text in xml_pages:
+        for xml_text in xml_pages[flushed_count:]:
             for record_xml in _split_records(xml_text):
                 try:
                     meta = parse_article_metadata(record_xml)
@@ -306,21 +309,21 @@ async def _run_pipeline(
         if len(failed_articles) > 100:
             failed_articles = failed_articles[-100:]
 
-        # Batch commit: one fsync per journal instead of per article
+        # Batch commit
         conn.commit()
 
         if success and xml_pages:
-            # Harvest completed successfully — mark as processed
             processed_shortnames.append(shortname)
             if shortname in failed_journals:
                 del failed_journals[shortname]
-            # Clear resume token (no longer needed)
             resume_tokens.pop(shortname, None)
-            # Store per-journal article count
             update_journal_article_count(conn, shortname, journal_article_count)
+            # Incremental export after each journal
+            try:
+                export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
+            except Exception:
+                logger.exception("Incremental export error")
         else:
-            # Harvest failed or returned no data — NOT added to processed_shortnames
-            # Will be retried on next run
             if shortname not in failed_journals:
                 failed_journals[shortname] = (
                     "harvest failed" if not success else "no records returned"
@@ -340,9 +343,24 @@ async def _run_pipeline(
 
     # Resume tokens for crash recovery
     resume_tokens: dict[str, str] = ckpt.get("resume_tokens", {})
+    flushed_count = 0
 
-    def on_page_done(shortname: str, token: str, collected: int) -> None:
-        """Save resumption token after each page for crash recovery."""
+    def on_page_done(shortname: str, token: str, collected: int, xml_pages: list[str]) -> None:
+        """Flush latest page to DB + save resumption token for crash recovery."""
+        nonlocal processed_articles, failed_articles, flushed_count
+        # Parse and insert the latest page
+        if xml_pages:
+            last_page = xml_pages[-1]
+            for record_xml in _split_records(last_page):
+                try:
+                    meta = parse_article_metadata(record_xml)
+                    insert_article(conn, meta)
+                    processed_articles += 1
+                except Exception as exc:
+                    failed_articles.append({"shortname": shortname, "error": str(exc)})
+            conn.commit()
+            flushed_count = len(xml_pages)
+        # Save token
         resume_tokens[shortname] = token
         ckpt["resume_tokens"] = resume_tokens
         _save_ckpt(ckpt)
@@ -390,12 +408,10 @@ async def _run_pipeline(
 
         pdf_checkpoint_interval = 25
         pdf_counter = 0
-        pdf_delay = 1.5
         pdf_errors_cache = load_pdf_errors()
 
         async def _download_one(oai_id: str, journal: str, pdf_path: Path) -> tuple[bool, bool]:
             """Download a single PDF with immediate retry on transient errors."""
-            nonlocal pdf_delay
             article_url = (
                 f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
             )
@@ -441,16 +457,17 @@ async def _run_pipeline(
                     ok = await download_pdf(client, pdf_url, pdf_path)
                     if ok:
                         remove_pdf_error(oai_id)
-                        pdf_delay = max(pdf_delay * 0.9, 1.0)
+                        adaptive_delay.on_success(journal)
                         return True, False
                     log_pdf_error(oai_id, article_url, "PDF download failed")
                     return False, True
                 except httpx.HTTPStatusError as exc:
                     is_transient = exc.response.status_code in (429, 500, 502, 503)
                     if exc.response.status_code == 429:
-                        pdf_delay = min(pdf_delay * 2.0, 30.0)
+                        adaptive_delay.on_429(journal)
                         if attempt < max_immediate_retries - 1:
-                            wait = pdf_delay * (attempt + 1)
+                            current_delay = adaptive_delay.get(journal)
+                            wait = current_delay * (attempt + 1)
                             logger.warning(
                                 "429 on PDF (attempt {}/{}), retry in {:.1f}s",
                                 attempt + 1,
@@ -462,7 +479,12 @@ async def _run_pipeline(
                     log_pdf_error(oai_id, article_url, str(exc), is_transient=is_transient)
                     return False, True
                 except Exception as exc:
-                    log_pdf_error(oai_id, article_url, str(exc))
+                    err_str = str(exc)
+                    is_transient = any(
+                        s in err_str
+                        for s in ("Errno -3", "Errno -5", "NameError", "Temporary failure")
+                    )
+                    log_pdf_error(oai_id, article_url, err_str, is_transient=is_transient)
                     return False, True
             return False, True
 
@@ -475,14 +497,15 @@ async def _run_pipeline(
             if pdf_counter % pdf_checkpoint_interval == 0:
                 ckpt["pdf_downloaded"] = pdf_downloaded
                 ckpt["pdf_failed"] = pdf_failed
+                ckpt["adaptive_delays"] = adaptive_delay.to_dict()
                 _save_ckpt(ckpt)
             _check_shutdown()
-            await asyncio.sleep(pdf_delay)
+            await asyncio.sleep(adaptive_delay.get(journal))
 
         # Retry previously failed PDFs first
         for entry in pdf_errors_cache[:]:
             oai_id = entry.get("oai_id", "")
-            if is_permanently_failed(oai_id, max_retries=5, cache=pdf_errors_cache):
+            if is_permanently_failed(oai_id, max_retries=10, cache=pdf_errors_cache):
                 continue
             row = conn.execute(
                 "SELECT a.id, j.short_name FROM articles a "
@@ -509,7 +532,7 @@ async def _run_pipeline(
                 pdf_path = Path("data/raw_pdfs") / safe_name
                 if pdf_path.exists():
                     continue
-                if is_permanently_failed(oai_id, max_retries=5, cache=pdf_errors_cache):
+                if is_permanently_failed(oai_id, max_retries=10, cache=pdf_errors_cache):
                     continue
                 await _do_download(oai_id, journal, pdf_path)
 
@@ -518,8 +541,8 @@ async def _run_pipeline(
         _save_ckpt(ckpt)
         logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
 
-        # Retry loop: retry transient (429) failures up to 3 more rounds
-        for retry_round in range(1, 4):
+        # Retry loop: retry transient failures up to 5 more rounds
+        for retry_round in range(1, 6):
             if _shutdown_requested:
                 break
             pdf_errors_cache = load_pdf_errors()  # Reload after each round
@@ -527,14 +550,16 @@ async def _run_pipeline(
                 e
                 for e in pdf_errors_cache
                 if not is_permanently_failed(
-                    e.get("oai_id", ""), max_retries=5, cache=pdf_errors_cache
+                    e.get("oai_id", ""), max_retries=10, cache=pdf_errors_cache
                 )
-                and e.get("retry_count", 0) < 5
+                and e.get("retry_count", 0) < 10
             ]
             if not retry_candidates:
                 break
             logger.info("PDF retry round {}: {} candidates", retry_round, len(retry_candidates))
-            pdf_delay = min(pdf_delay * 2.0, 30.0)
+            # Progressive wait between retry rounds: 30s, 45s, 60s
+            round_wait = 15 + retry_round * 15
+            await asyncio.sleep(round_wait)
             for entry in retry_candidates:
                 if _shutdown_requested:
                     break

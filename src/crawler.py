@@ -136,8 +136,8 @@ async def harvest_all_journals(
     max_records_per_journal: int = 20,
     inter_request_delay: float = 1.5,
     adaptive_delay: AdaptiveDelay | None = None,
-    on_journal_done: Callable[[str, list[str], bool], None] | None = None,
-    on_page_done: Callable[[str, str, int], None] | None = None,
+    on_journal_done: Callable[[str, list[str], bool, int], None] | None = None,
+    on_page_done: Callable[[str, str, int, list[str]], None] | None = None,
     resume_tokens: dict[str, str] | None = None,
 ) -> dict[str, list[str]] | None:
     """Harvest OAI-PMH ListRecords XML for all journals concurrently.
@@ -152,8 +152,8 @@ async def harvest_all_journals(
         max_records_per_journal: Max records to fetch per journal.
         inter_request_delay: Base delay between requests in seconds (+/- 30% jitter).
         adaptive_delay: AdaptiveDelay instance for 429 backoff.
-        on_journal_done: Callback invoked as on_journal_done(shortname, xml_pages, success).
-        on_page_done: Callback after each page: on_page_done(shortname, token, collected).
+        on_journal_done: Callback: on_journal_done(shortname, xml_pages, success, flushed_count).
+        on_page_done: Callback: on_page_done(shortname, token, collected, xml_pages).
         resume_tokens: Dict mapping shortname to resumption token for resume.
 
     Returns:
@@ -168,6 +168,7 @@ async def harvest_all_journals(
     async def _harvest_one(shortname: str, index: int) -> None:
         nonlocal completed
         xml_pages: list[str] = []
+        flushed_count = 0
         harvest_success = False
         async with semaphore:
             delay = adaptive_delay.get(shortname) if adaptive_delay else inter_request_delay
@@ -225,9 +226,10 @@ async def harvest_all_journals(
                     url = (
                         f"{DERGIPARK_OAI_BASE}/{shortname}?verb=ListRecords&resumptionToken={token}"
                     )
-                    # Persist token for crash recovery
+                    # Persist token for crash recovery + flush page to DB
                     if on_page_done:
-                        on_page_done(shortname, token, collected_records)
+                        on_page_done(shortname, token, collected_records, xml_pages)
+                        flushed_count = len(xml_pages)
                 harvest_success = True
             except Exception as exc:  # Permanent error after retry
                 if adaptive_delay and "429" in str(exc):
@@ -236,7 +238,9 @@ async def harvest_all_journals(
                 xml_pages.clear()  # Don't process partial data
             finally:
                 if on_journal_done is not None:
-                    on_journal_done(shortname, xml_pages, success=harvest_success)
+                    on_journal_done(
+                        shortname, xml_pages, success=harvest_success, flushed_count=flushed_count
+                    )
                 else:
                     results[shortname] = xml_pages
                 completed += 1
