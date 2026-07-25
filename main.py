@@ -288,41 +288,87 @@ async def _run_pipeline(
         logger.info("Limit: processing {} journals (all articles each)", len(remaining_names))
     max_per_journal = 999999
 
+    def _audit_journal(conn, shortname: str) -> list[str]:
+        """Check DB vs expected count. Return missing oai_identifiers."""
+        expected = harvested_count.get(shortname, 0)
+        h_ids = harvested_ids.get(shortname, set())
+        row = conn.execute(
+            "SELECT j.id FROM journals j WHERE j.short_name = ?", (shortname,)
+        ).fetchone()
+        if not row:
+            return []
+        journal_id = row[0]
+        db_ids = {
+            r[0]
+            for r in conn.execute(
+                "SELECT oai_identifier FROM articles WHERE journal_id = ? AND oai_identifier IS NOT NULL",
+                (journal_id,),
+            )
+        }
+        missing = sorted(h_ids - db_ids)
+        db_count = len(db_ids)
+        if missing:
+            logger.warning(
+                "Audit '{}': DB={}, expected={}, missing={}: {}",
+                shortname,
+                db_count,
+                expected,
+                len(missing),
+                missing[:10],
+            )
+        harvested_count.pop(shortname, None)
+        harvested_ids.pop(shortname, None)
+        return missing
+
     def on_journal_done(
         shortname: str, xml_pages: list[str], success: bool = True, flushed_count: int = 0
     ) -> None:
-        """Called when each journal harvest completes: process remaining pages + export."""
+        """Called when each journal harvest completes: process remaining pages + audit + export."""
         nonlocal processed_articles, failed_articles
-        # Only process pages not yet flushed by on_page_done
+        # Process remaining unflushed pages (flushed pages were popped by on_page_done)
         journal_article_count = 0
-        for xml_text in xml_pages[flushed_count:]:
+        for xml_text in xml_pages:
             for record_xml in _split_records(xml_text):
                 try:
                     meta = parse_article_metadata(record_xml)
                     insert_article(conn, meta)
                     processed_articles += 1
                     journal_article_count += 1
+                    oid = meta.get("oai_identifier", "")
+                    if oid:
+                        harvested_ids.setdefault(shortname, set()).add(oid)
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
 
-        # Trim failed_articles (keep checkpoint size small)
+        harvested_count[shortname] = harvested_count.get(shortname, 0) + journal_article_count
+
+        # Trim failed_articles
         if len(failed_articles) > 100:
             failed_articles = failed_articles[-100:]
 
-        # Batch commit
         conn.commit()
 
-        if success and xml_pages:
-            processed_shortnames.append(shortname)
-            if shortname in failed_journals:
-                del failed_journals[shortname]
-            resume_tokens.pop(shortname, None)
-            update_journal_article_count(conn, shortname, journal_article_count)
-            # Incremental export after each journal
-            try:
-                export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-            except Exception:
-                logger.exception("Incremental export error")
+        if success:
+            # Audit: check DB vs expected
+            missing = _audit_journal(conn, shortname)
+            if missing:
+                logger.warning(
+                    "Journal '{}': {} missing articles, retrying on next run",
+                    shortname,
+                    len(missing),
+                )
+                if shortname not in failed_journals:
+                    failed_journals[shortname] = f"audit: {len(missing)} missing"
+            else:
+                processed_shortnames.append(shortname)
+                if shortname in failed_journals:
+                    del failed_journals[shortname]
+                resume_tokens.pop(shortname, None)
+                update_journal_article_count(conn, shortname, journal_article_count)
+                try:
+                    export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
+                except Exception:
+                    logger.exception("Incremental export error")
         else:
             if shortname not in failed_journals:
                 failed_journals[shortname] = (
@@ -343,24 +389,30 @@ async def _run_pipeline(
 
     # Resume tokens for crash recovery
     resume_tokens: dict[str, str] = ckpt.get("resume_tokens", {})
-    flushed_count = 0
+    harvested_count: dict[str, int] = {}  # shortname → expected article count
+    harvested_ids: dict[str, set[str]] = {}  # shortname → set of oai_identifiers parsed
 
     def on_page_done(shortname: str, token: str, collected: int, xml_pages: list[str]) -> None:
         """Flush latest page to DB + save resumption token for crash recovery."""
-        nonlocal processed_articles, failed_articles, flushed_count
-        # Parse and insert the latest page
+        nonlocal processed_articles, failed_articles
         if xml_pages:
-            last_page = xml_pages[-1]
+            last_page = xml_pages.pop(0)
+            page_count = 0
+            page_ids: set[str] = set()
             for record_xml in _split_records(last_page):
                 try:
                     meta = parse_article_metadata(record_xml)
                     insert_article(conn, meta)
                     processed_articles += 1
+                    page_count += 1
+                    oid = meta.get("oai_identifier", "")
+                    if oid:
+                        page_ids.add(oid)
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
+            harvested_count[shortname] = harvested_count.get(shortname, 0) + page_count
+            harvested_ids.setdefault(shortname, set()).update(page_ids)
             conn.commit()
-            flushed_count = len(xml_pages)
-        # Save token
         resume_tokens[shortname] = token
         ckpt["resume_tokens"] = resume_tokens
         _save_ckpt(ckpt)
