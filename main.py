@@ -218,6 +218,8 @@ async def run(limit: int = 0) -> None:
         except Exception:
             logger.exception("Pipeline error")
         finally:
+            with contextlib.suppress(Exception):
+                export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
             _save_ckpt(ckpt)
             conn.close()
             logger.info("=== dergipark-miner finished ===")
@@ -473,6 +475,13 @@ async def _run_pipeline(
         failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
 
     _save_ckpt(ckpt)
+
+    # 3b. Export after harvest (before PDF download)
+    try:
+        export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
+        logger.info("Post-harvest export done: data/exports/all_articles.jsonl")
+    except Exception:
+        logger.exception("Post-harvest export error")
 
     # 4. PDF indirme (rate-limit aware: adaptive delay between downloads)
     try:

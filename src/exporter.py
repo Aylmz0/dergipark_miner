@@ -54,6 +54,7 @@ def export_all_articles(
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_suffix(".tmp")
 
     conn.row_factory = None
 
@@ -77,7 +78,7 @@ def export_all_articles(
 
     succeeded = 0
     failed = 0
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(tmp_path, "w", encoding="utf-8") as f:
         while True:
             batch = cursor.fetchmany(_FETCH_SIZE)
             if not batch:
@@ -92,6 +93,8 @@ def export_all_articles(
                     failed += 1
                     logger.warning("Export skip article id={}: {}", article[0], exc)
 
+    # Atomic rename: old file stays valid until rename succeeds
+    tmp_path.rename(output_path)
     logger.info("Export: {} succeeded, {} failed", succeeded, failed)
     return output_path
 

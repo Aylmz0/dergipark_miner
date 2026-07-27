@@ -571,13 +571,15 @@ def load_pdf_errors() -> list[dict]:
 
 
 def save_pdf_errors(errors: list[dict]) -> None:
-    """Write the PDF error list to pdf_errors.json.
+    """Write the PDF error list to pdf_errors.json atomically (tmp + rename).
 
     Args:
         errors: List of error dicts to persist.
     """
     PDF_ERRORS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PDF_ERRORS_PATH.write_text(json.dumps(errors, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = PDF_ERRORS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(errors, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.rename(PDF_ERRORS_PATH)
 
 
 def log_pdf_error(oai_id: str, article_url: str, error: str, is_transient: bool = False) -> None:
