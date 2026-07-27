@@ -1,92 +1,114 @@
-Bu metin, geliştireceğiniz **Asenkron Akademik Veri Madenciliği Projesi** için baştan sona tüm mimariyi, kullanılacak modern araçları ve takip edilecek adımları içeren resmi kılavuzunuzdur (Kutup Yıldızı). Projenin her aşamasında bu dokümana geri dönerek rotanızı kontrol edebilirsiniz.
+# dergipark-miner
 
----
+Asenkron akademik veri madenciliği aracı. DergiPark'taki tüm dergileri (`~2,574`) keşfeder, OAI-PMH ile makaleleri hasat eder, PDF'leri indirir, HTML meta etiketlerinden zengin metadata çıkarır ve tek bir JSONL dosyasına dışa aktarır. Checkpoint tabanlı resume, her aşamada veri koruması sağlar.
 
-# Proje Kutup Yıldızı: Asenkron Akademik Veri Madenciliği Aracı
+## Teknoloji Yığını
 
-## 1. Mimari Tasarım ve Teknoloji Yığını (Tech Stack)
+- **Python 3.14** + `uv` paket yöneticisi
+- `httpx` — asenkron HTTP (OAI-PMH + PDF + HTML scraping)
+- `selectolax` — C tabanlı HTML/XML parsing
+- `loguru` — yapılandırılmış loglama
+- `sqlite3` + WAL mode — yerel depolama
+- `ruff` — lint ve format
+- `pytest` — testler
 
-Projenin temel felsefesi: **Maksimum performans, minimal bağımlılık, asenkron iş akışı ve veri güvenilirliğidir.**
-
-* **Proje ve Paket Yönetimi:** `uv` (Rust ile yazılmış, ultra hızlı yeni nesil paket yöneticisi).
-* **Kod Kalitesi ve Format:** `ruff` (Rust ile yazılmış, linter ve formatter standardı).
-* **Ağ ve Bağlantı (HTTP):** `httpx` (Asenkron HTTP istekleri için).
-* **HTML Parçalama (Parsing):** `selectolax` (C tabanlı Modest motoru kullanan, en hızlı HTML ayrıştırıcı).
-* **Akademik Veri Bağlantıları:** OpenAlex API (Doğrudan `httpx` ile asenkron sorgular).
-* **PDF İşleme:** `opendataloader-pdf` (Hybrid Mode: Basit sayfalar için hızlı Java motoru, karmaşık tablolar/OCR için yerel `docling` sunucusu).
-* **Veri Manipülasyonu:** `polars` (Rust tabanlı, bellek dostu ve yüksek performanslı veri çerçevesi).
-* **Veritabanı:** `sqlite3` (Yerel, hafif, ilişkisel ve kurşun geçirmez depolama).
-* **Takip ve Günlükleme:** `loguru` (Modern loglama) + `tqdm` (Hafif ilerleme çubuğu).
-
----
-
-## 2. Proje Dosya Yapısı (Folder Structure)
-
-Modern Python standartlarına ve `uv` yapısına uygun, temiz ve modüler dosya düzeni:
-
-```text
-dergipark_miner/
-├── .venv/                      # uv tarafından yönetilen sanal ortam
-├── data/
-│   ├── raw_pdfs/               # İndirilen ham PDF makaleleri
-│   ├── parsed_jsons/           # PDF'lerden çıkarılan yapılandırılmış metinler
-│   └── Sobiad_Mining.sqlite    # SQLite yerel veritabanı dosyası
-├── src/
-│   ├── __init__.py
-│   ├── crawler.py              # httpx ve selectolax ile sayfa/metadata kazıma
-│   ├── pdf_processor.py        # opendataloader-pdf ve docling entegrasyonu
-│   ├── storage.py              # polars ve sqlite3 veritabanı işlemleri
-│   ├── utils.py                # Ortak yardımcı fonksiyonlar (Telegram bot vb.)
-│   └── main.py                 # Ana orkestrasyon ve döngü yönetimi (tqdm + loguru)
-├── tests/                      # Birim testleri
-│   └── __init__.py
-├── checkpoint.json             # Kod kesintiye uğrarsa kalınan yeri tutan dosya
-├── pyproject.toml              # Proje bağımlılıkları, uv ve ruff ayarları
-└── README.md                   # Proje genel açıklaması ve çalıştırma kılavuzu
+## Proje Yapısı
 
 ```
+dergipark_miner/
+├── main.py                    # CLI entry point + orkestrasyon
+├── src/
+│   ├── crawler.py             # OAI-PMH harvest, PDF download, HTML scraping
+│   ├── exporter.py            # JSONL dışa aktarma (single JOIN + GROUP_CONCAT)
+│   ├── storage.py             # SQLite şema, insert/upsert, indeksler
+│   └── utils.py               # retry, AdaptiveDelay, checkpoint I/O
+├── tests/                     # 59 birim testi
+├── data/
+│   ├── Sobiad_Mining.sqlite   # SQLite veritabanı
+│   ├── raw_pdfs/              # İndirilen PDF dosyaları
+│   ├── exports/               # Dışa aktarılan JSONL
+│   └── pdf_errors.json        # Kalıcı başarısız PDF'ler
+└── checkpoint.json            # Pipeline durumu (resume)
+```
 
----
+## Kullanım
 
-## 3. Adım Adım Geliştirme Yol Haritası
+```bash
+# Tam pipeline (tüm dergiler)
+.venv/bin/python main.py --limit 0
 
-### Faz 1: Proje Ortamı ve Standartların Kurulması
+# İlk 6 dergiyi işle
+.venv/bin/python main.py --limit 6
 
-1. **uv ile Projeyi Başlatın:** Proje klasöründe `uv init` komutunu çalıştırarak modern Python ortamını oluşturun.
-2. **Bağımlılıkları Ekleyin:** `uv add httpx selectolax polars loguru tqdm` komutları ile ana kütüphaneleri yükleyin. `pip install -U "opendataloader-pdf[hybrid]"` ile PDF motorunu kurun.
-3. **Geliştirici Araçlarını Yapılandırın:** `uv add --dev ruff` ile kod denetleyicisini ekleyin. `pyproject.toml` içerisine ruff kurallarını (line-length, select vb.) ekleyerek her kod yazımından önce `ruff check` ve `ruff format` komutlarıyla kodu temizleyin.
+# Durdur (Ctrl+C) — mevcut journal tamamlanır, checkpoint kaydedilir
+# Yeniden çalıştır — kaldığı yerden devam eder
+```
 
-### Faz 2: Veri Toplama ve Kazıma Motoru (src/crawler.py)
+## Pipeline Akışı
 
-1. **OAI-PMH Entegrasyonu:** DergiPark'ın toplu metadata sağlayan OAI-PMH XML servislerine `httpx` ile asenkron istekler atın.
-2. **HTML Parse Fonksiyonları:** XML'de eksik kalan spesifik alanlar (anahtar kelimeler, DOI vb.) için makale detay sayfalarını `httpx` ile asenkron indirin ve `selectolax` CSS seçicileri ile ışık hızında ayıklayın.
-3. **OpenAlex API Bağlantısı:** DOI numarası alınan makalelerin uluslararası atıf ağlarını ve yazar eşleştirmelerini doğrulamak için `httpx` üzerinden doğrudan OpenAlex API'sine asenkron sorgular gönderin.
+1. **Dergi Keşfi** — DergiPark'tan tüm dergileri paginasyon ile çeker (~2,574 dergi)
+2. **OAI-PMH Hasat** — Her dergi için makale metadata'sını XML sayfalar halinde çeker (streaming)
+3. **Parse + Insert** — XML'den `title`, `doi`, `authors`, `abstract`, `keywords`, `language` çıkarır, SQLite'a yazar
+4. **PDF İndirme** — Makale sayfasından `citation_pdf_url` meta etiketini çeker, PDF'i indirir
+5. **HTML Metadata** — Aynı sayfadan `journal_title`, `issn`, `publisher`, `volume`, `issue` vs. çıkarır, `is_oa = 1` atar
+6. **JSONL Export** — Tüm makaleleri tek dosyaya aktarır (22 alan, profesyonel sıralama)
 
-### Faz 3: Hibrit PDF İşleme Hattı (src/pdf_processor.py)
+## Direnç Mekanizmaları
 
-1. **PDF İndirme Sistemi:** `crawler.py` tarafından bulunan PDF linklerini `httpx` akış (stream) modunda `data/raw_pdfs/` klasörüne asenkron olarak indirin.
-2. **Docling Sunucusunu Başlatma:** Arka planda `opendataloader-pdf-hybrid --port 5002 --force-ocr --ocr-lang "tr,en"` komutu ile yerel AI tabanlı docling sunucusunu ayağa kaldırın.
-3. **Parsing İşlemi:** İndirilen PDF'leri `opendataloader_pdf.convert(..., hybrid="docling-fast")` fonksiyonuna besleyin. Basit sayfaların Java ile hızlıca, tablolu sayfaların ise Docling ile yüksek doğrulukla JSON'a dönüştürülmesini sağlayın.
+| Özellik | Detay |
+|---------|-------|
+| **Checkpoint Resume** | `checkpoint.json` her journal sonunda kaydedilir. Crash sonrası kaldığı yerden devam |
+| **OAI-PMH Token Recovery** | `badResumptionToken` hatası = journal'ı baştan dene (max 3 kez) |
+| **Journal Audit** | Her journal sonrası DB vs. expected karşılaştırma, eksik makaleler loglanır |
+| **Journal Retry** | Audit başarısız journal'ları aynı çalıştırmada max 3 round yeniden dener |
+| **PDF Adaptive Delay** | 429/5xx durumunda otomatik backoff (2s → 60s), başarıda decay |
+| **PDF Retry Chain** | Anlık retry (3 deneme) → 5 retry round'u (30/45/60/75/90s bekleme) |
+| **Content Hash Dedup** | DOI + OAI ID yoksa: `MD5(title|journal_id|date)` ile duplike engelleme |
+| **Graceful Shutdown** | SIGINT/SIGTERM = mevcut journal tamamlanır, checkpoint kaydedilir |
+| **Transient Error Handling** | DNS hataları, 429, 500-503 = transient, `retry_count` artmaz |
 
-### Faz 4: Veri Temizleme, Modelleme ve Depolama (src/storage.py)
+## Veritabanı Şeması
 
-1. **Polars ile Normalizasyon:** Kazınan metadataları ve PDF'lerden çıkan JSON çıktılarını `polars.DataFrame` yapısına alın. Eksik verileri temizleyin, yazar isimlerini standardize edin ve tarih formatlarını düzenleyin.
-2. **SQLite Şema Tasarımı:** Veritabanında `journals` (dergiler), `articles` (makaleler), `authors` (yazarlar) ve `citations` (atıflar) tablolarını (Primary/Foreign Key ilişkileriyle) oluşturun.
-3. **Veritabanına Yazma:** Polars ile temizlenen verileri `sqlite3` veritabanına bulk (toplu) veya sıralı `INSERT` sorgularıyla kalıcı olarak yazın.
+**journals:** `id`, `short_name` (UNIQUE), `name`, `article_count`
 
-### Faz 5: Orkestrasyon, Loglama ve Kesinti Yönetimi (src/main.py)
+**articles (26 sütun):** `id`, `journal_id` (FK), `title`, `doi`, `publication_date`, `oai_identifier`, `abstract`, `keywords`, `language`, `journal_title`, `issn`, `publisher`, `volume`, `issue`, `firstpage`, `lastpage`, `pages`, `pdf_url`, `orcid`, `article_type`, `references`, `metadata`, `is_oa`, `enriched_at`, `content_hash`, `created_at`
 
-1. **Ana Döngü:** Tüm bileşenleri `main.py` içinde birleştirin. Binlerce makalelik listeyi `tqdm` ilerleme çubuğu içine alarak terminalde anlık hız ve kalan süre takibi yapın.
-2. **Hata Yakalama (Robustness):** Her asenkron isteği ve PDF işleme adımını `try-except` blokları içine alın. İnternet kopması veya hatalı veri durumunda kodun çökmesini engelleyin; başarısız işlemleri `loguru` ile `data/error.log` dosyasına kaydedin.
-3. **Checkpoint (Kaldığı Yerden Devam):** Her 50-100 başarılı kayıtta bir, en son işlenen makale ID'sini `checkpoint.json` dosyasına yazın. Sistem kapansa bile yeniden başlatıldığında bu dosyayı okuyarak kaldığı yerden devam etmesini sağlayın.
+**authors:** `id`, `article_id` (FK), `name`
 
----
+## JSONL Çıktı Formatı (22 Alan)
 
-## 4. Final Hedefi ve Başarı Kriterleri
+```json
+{
+  "slug": "dergipark-org-tr-journal-name",
+  "article_id": "dergipark.org.tr:article/12345",
+  "article_url": "https://dergipark.org.tr/...",
+  "title": "Makale Başlığı",
+  "authors": ["Yazar 1", "Yazar 2"],
+  "journal_title": "Dergi Adı",
+  "issn": "1234-5678",
+  "publisher": "Yayınevi",
+  "volume": "10",
+  "issue": "2",
+  "firstpage": "1",
+  "lastpage": "20",
+  "pages": "1-20",
+  "date": "2024",
+  "language": "tur",
+  "doi": "10.xxxx/xxxxx",
+  "abstract": "Makale özeti...",
+  "keywords": ["anahtar", "kelime"],
+  "is_oa": 1,
+  "pdf_url": "https://dergipark.org.tr/.../article.pdf",
+  "orcid": "0000-0000-0000-0000",
+  "article_type": "research-article",
+  "references": "...>"
+}
+```
 
-Bu projenin başarıyla tamamlandığının göstergeleri şunlardır:
+## Testler
 
-1. **Hız:** Asenkron mimari sayesinde geleneksel Selenium/Requests tabanlı sistemlere kıyasla en az 10 kat daha hızlı veri toplayabilmesi.
-2. **Doğruluk:** `opendataloader-pdf` hibrit modu sayesinde makale içindeki tabloların yapısı bozulmadan veritabanına aktarılabilmesi.
-3. **Dayanıklılık:** Günlerce çalışsa dahi bellek sızıntısı (memory leak) yapmaması, internet kesintilerinde kendi kendine yeniden deneme (`retry`) mekanizmasını çalıştırabilmesi ve çöktüğünde veri kaybetmeden kaldığı yerden devam edebilmesi.
-4. **Temiz Kod Düzeni:** Projenin her aşamasında `ruff` standartlarına uyulmuş, modüler ve kurumsal kalitede bir repo teslim edilmesi.
+```bash
+.venv/bin/python -m pytest tests/ -v
+```
+
+59 test: crawler (metadata parsing, PDF error handling, HTML scraping), exporter (JSONL structure, sorting, idempotent), storage (upsert, content hash dedup, author write), utils (retry, checkpoint, AdaptiveDelay).
