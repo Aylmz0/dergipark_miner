@@ -497,6 +497,7 @@ async def _run_pipeline(
         pdf_checkpoint_interval = 25
         pdf_counter = 0
         pdf_errors_cache = load_pdf_errors()
+        _failed_set: set[str] = set()  # unique failures only
 
         async def _download_one(oai_id: str, journal: str, pdf_path: Path) -> tuple[bool, bool]:
             """Download a single PDF with immediate retry on transient errors."""
@@ -580,7 +581,9 @@ async def _run_pipeline(
             nonlocal pdf_downloaded, pdf_failed, pdf_counter
             downloaded, failed = await _download_one(oai_id, journal, pdf_path)
             pdf_downloaded += downloaded
-            pdf_failed += failed
+            if failed and oai_id not in _failed_set:
+                pdf_failed += 1
+                _failed_set.add(oai_id)
             pdf_counter += 1
             if pdf_counter % pdf_checkpoint_interval == 0:
                 ckpt["pdf_downloaded"] = pdf_downloaded
@@ -606,6 +609,9 @@ async def _run_pipeline(
             _, journal = row
             safe_name = oai_id.replace("/", "_") + ".pdf"
             pdf_path = Path("data/raw_pdfs") / safe_name
+            if pdf_path.exists():
+                remove_pdf_error(oai_id)
+                continue
             await _do_download(oai_id, journal, pdf_path)
 
         # Then normal download (streaming cursor)
@@ -619,6 +625,7 @@ async def _run_pipeline(
                 safe_name = oai_id.replace("/", "_") + ".pdf"
                 pdf_path = Path("data/raw_pdfs") / safe_name
                 if pdf_path.exists():
+                    remove_pdf_error(oai_id)
                     continue
                 if is_permanently_failed(oai_id, max_retries=10, cache=pdf_errors_cache):
                     continue
@@ -664,6 +671,7 @@ async def _run_pipeline(
                 safe_name = oai_id.replace("/", "_") + ".pdf"
                 pdf_path = Path("data/raw_pdfs") / safe_name
                 if pdf_path.exists():
+                    remove_pdf_error(oai_id)
                     continue
                 await _do_download(oai_id, journal, pdf_path)
 
