@@ -10,9 +10,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+from loguru import logger
 from selectolax.parser import HTMLParser
 
-from src.utils import AdaptiveDelay, logger, retry, setup_logger
+from src.utils import AdaptiveDelay, retry, setup_logger
 
 # DergiPark OAI-PMH base URL (verified live 2026-07, returns 200 + <OAI-PMH>).
 # OAI-PMH is per-journal; single journal URL is "{DERGIPARK_OAI_BASE}/{short_name}"
@@ -22,9 +23,6 @@ DERGIPARK_OAI_BASE = "https://dergipark.org.tr/api/public/oai"
 # DergiPark journal discovery (index) page. Pagination via "?page=N".
 DERGIPARK_JOURNALS_URL = "https://dergipark.org.tr/tr/pub/explore/journals"
 
-# OpenAlex REST API base URL (per official documentation).
-OPENALEX_BASE = "https://api.openalex.org"
-
 # OAI-PMH ListRecords metadata format.
 # Live verified (2026-07, journal "ihad"): supported prefixes are oai_dc, oai_etdms,
 # oai_marc, oai_mods; ListRecords example:
@@ -33,6 +31,30 @@ OAI_METADATA_PREFIX = "oai_dc"
 
 # Default User-Agent for all external HTTP requests.
 DEFAULT_USER_AGENT = "dergipark-miner/0.1 (https://github.com/example/dergipark_miner)"
+
+# PDF retry limits
+MAX_PDF_RETRIES = 10
+MAX_IMMEDIATE_RETRIES = 3
+
+# Paths
+PDF_DIR = Path("data/raw_pdfs")
+
+
+def pdf_destination(oai_id: str) -> Path:
+    """Convert an OAI identifier to a PDF file path."""
+    safe_name = oai_id.replace("/", "_") + ".pdf"
+    return PDF_DIR / safe_name
+
+
+def lookup_article_by_oai(conn, oai_id: str):
+    """Look up article + journal by OAI identifier. Returns (article_id, short_name) or None."""
+    row = conn.execute(
+        "SELECT a.id, j.short_name FROM articles a "
+        "JOIN journals j ON a.journal_id = j.id "
+        "WHERE a.oai_identifier = ?",
+        (oai_id,),
+    ).fetchone()
+    return row
 
 
 def _extract_journals(html: str) -> list[dict]:

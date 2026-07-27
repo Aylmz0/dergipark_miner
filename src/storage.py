@@ -89,86 +89,35 @@ def init_db(path: str | Path) -> sqlite3.Connection:
         """
     )
 
-    # Old databases may be missing oai_identifier column; add it
+    # Old databases may be missing columns; add them if needed
+    _MIGRATE_COLUMNS = [
+        ("oai_identifier", "TEXT"),
+        ("enriched_at", "TEXT"),
+        ("content_hash", "TEXT"),
+        ("abstract", "TEXT"),
+        ("keywords", "TEXT"),
+        ("language", "TEXT"),
+        ("journal_title", "TEXT"),
+        ("issn", "TEXT"),
+        ("publisher", "TEXT"),
+        ("volume", "TEXT"),
+        ("issue", "TEXT"),
+        ("firstpage", "TEXT"),
+        ("lastpage", "TEXT"),
+        ("pages", "TEXT"),
+        ("pdf_url", "TEXT"),
+        ("orcid", "TEXT"),
+        ("article_type", "TEXT"),
+        ("[references]", "TEXT"),
+        ("metadata", "TEXT"),
+        ("is_oa", "INTEGER"),
+    ]
     cols = {row[1] for row in conn.execute("PRAGMA table_info(articles)").fetchall()}
-    if "oai_identifier" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN oai_identifier TEXT")
-
-    # enriched_at column may be missing; add it
-    if "enriched_at" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN enriched_at TEXT")
-
-    # content_hash column may be missing; add it (for dedup)
-    if "content_hash" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN content_hash TEXT")
-
-    # abstract column may be missing; add it
-    if "abstract" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN abstract TEXT")
-
-    # keywords column may be missing; add it
-    if "keywords" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN keywords TEXT")
-
-    # language column may be missing; add it
-    if "language" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN language TEXT")
-
-    # journal_title column may be missing; add it
-    if "journal_title" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN journal_title TEXT")
-
-    # issn column may be missing; add it
-    if "issn" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN issn TEXT")
-
-    # publisher column may be missing; add it
-    if "publisher" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN publisher TEXT")
-
-    # volume column may be missing; add it
-    if "volume" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN volume TEXT")
-
-    # issue column may be missing; add it
-    if "issue" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN issue TEXT")
-
-    # firstpage column may be missing; add it
-    if "firstpage" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN firstpage TEXT")
-
-    # lastpage column may be missing; add it
-    if "lastpage" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN lastpage TEXT")
-
-    # pages column may be missing; add it
-    if "pages" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN pages TEXT")
-
-    # pdf_url column may be missing; add it
-    if "pdf_url" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN pdf_url TEXT")
-
-    # orcid column may be missing; add it
-    if "orcid" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN orcid TEXT")
-
-    # article_type column may be missing; add it
-    if "article_type" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN article_type TEXT")
-
-    # references column may be missing; add it
-    if "references" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN [references] TEXT")
-
-    # metadata column may be missing; add it
-    if "metadata" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN metadata TEXT")
-
-    # is_oa column may be missing; add it
-    if "is_oa" not in cols:
-        conn.execute("ALTER TABLE articles ADD COLUMN is_oa INTEGER")
+    for col_name, col_type in _MIGRATE_COLUMNS:
+        # [references] is stored as "references" in PRAGMA output
+        lookup = col_name.strip("[]")
+        if lookup not in cols:
+            conn.execute(f"ALTER TABLE articles ADD COLUMN {col_name} {col_type}")
 
     # article_count column may be missing in journals; add it
     journal_cols = {row[1] for row in conn.execute("PRAGMA table_info(journals)").fetchall()}

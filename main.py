@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import signal
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -23,6 +24,8 @@ from loguru import logger
 
 from src.crawler import (
     DEFAULT_USER_AGENT,
+    MAX_IMMEDIATE_RETRIES,
+    MAX_PDF_RETRIES,
     _pdf_link_priority,
     _resolve_pdf_url,
     _split_records,
@@ -32,7 +35,9 @@ from src.crawler import (
     is_permanently_failed,
     load_pdf_errors,
     log_pdf_error,
+    lookup_article_by_oai,
     parse_article_metadata,
+    pdf_destination,
     remove_pdf_error,
     scrape_article_html_metadata,
 )
@@ -41,9 +46,64 @@ from src.storage import init_db, insert_article, insert_journals, update_journal
 from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger
 
 CHECKPOINT_PATH = Path("checkpoint.json")
+DB_PATH = Path("data/Sobiad_Mining.sqlite")
+EXPORT_PATH = Path("data/exports/all_articles.jsonl")
+
+# Pipeline limits
+JOURNAL_RETRY_ROUNDS = 3
+PDF_RETRY_ROUNDS = 5
+MAX_FAILED_JOURNALS = 100
+MAX_FAILED_ARTICLES = 100
 
 # Shutdown flag for graceful Ctrl+C handling
 _shutdown_requested = False
+
+
+@dataclass
+class PipelineState:
+    """Mutable state shared across pipeline phases."""
+
+    ckpt: dict
+    processed_shortnames: list[str] = field(default_factory=list)
+    failed_journals: dict[str, str] = field(default_factory=dict)
+    failed_articles: list[dict] = field(default_factory=list)
+    processed_articles: int = 0
+    pdf_downloaded: int = 0
+    pdf_failed: int = 0
+    adaptive_delay: AdaptiveDelay | None = None
+    resume_tokens: dict[str, str] = field(default_factory=dict)
+    harvested_count: dict[str, int] = field(default_factory=dict)
+    harvested_ids: dict[str, set[str]] = field(default_factory=dict)
+
+    @classmethod
+    def from_checkpoint(cls, ckpt: dict) -> PipelineState:
+        """Create state from loaded checkpoint."""
+        return cls(
+            ckpt=ckpt,
+            processed_shortnames=ckpt.get("processed_shortnames", []),
+            failed_journals=ckpt.get("failed_journals", {}),
+            failed_articles=ckpt.get("failed_articles", []),
+            processed_articles=ckpt.get("processed_articles", 0),
+            pdf_downloaded=ckpt.get("pdf_downloaded", 0),
+            pdf_failed=ckpt.get("pdf_failed", 0),
+            resume_tokens=ckpt.get("resume_tokens", {}),
+        )
+
+    def save_ckpt(self) -> None:
+        """Persist state to checkpoint file."""
+        self.ckpt.update(
+            {
+                "processed_shortnames": self.processed_shortnames,
+                "processed_articles": self.processed_articles,
+                "failed_journals": self.failed_journals,
+                "failed_articles": self.failed_articles,
+                "adaptive_delays": self.adaptive_delay.to_dict() if self.adaptive_delay else {},
+                "resume_tokens": self.resume_tokens,
+                "pdf_downloaded": self.pdf_downloaded,
+                "pdf_failed": self.pdf_failed,
+            }
+        )
+        _save_ckpt(self.ckpt)
 
 
 def _save_ckpt(ckpt: dict) -> None:
@@ -175,24 +235,18 @@ async def run(limit: int = 0) -> None:
     logger.info("=== dergipark-miner started ===")
 
     # 1. Database (init first — needed for checkpoint reload)
-    db_path = Path("data/Sobiad_Mining.sqlite")
-    conn = init_db(db_path)
-    logger.info("Database ready: {}", db_path)
+    conn = init_db(DB_PATH)
+    logger.info("Database ready: {}", DB_PATH)
 
     # Checkpoint yukle
     ckpt = load_checkpoint(CHECKPOINT_PATH)
-    processed_shortnames: list[str] = ckpt.get("processed_shortnames", [])
-    failed_journals: dict[str, str] = ckpt.get("failed_journals", {})
-    failed_articles: list[dict] = ckpt.get("failed_articles", [])
-    processed_articles: int = ckpt.get("processed_articles", 0)
-    pdf_downloaded: int = ckpt.get("pdf_downloaded", 0)
-    pdf_failed: int = ckpt.get("pdf_failed", 0)
+    state = PipelineState.from_checkpoint(ckpt)
 
-    if processed_shortnames:
+    if state.processed_shortnames:
         logger.info(
             "Checkpoint loaded: {} processed, {} articles",
-            len(processed_shortnames),
-            processed_articles,
+            len(state.processed_shortnames),
+            state.processed_articles,
         )
 
     async with httpx.AsyncClient(
@@ -201,26 +255,15 @@ async def run(limit: int = 0) -> None:
         timeout=httpx.Timeout(60.0),
     ) as client:
         try:
-            await _run_pipeline(
-                client,
-                conn,
-                ckpt,
-                processed_shortnames=processed_shortnames,
-                failed_journals=failed_journals,
-                failed_articles=failed_articles,
-                processed_articles=processed_articles,
-                pdf_downloaded=pdf_downloaded,
-                pdf_failed=pdf_failed,
-                limit=limit,
-            )
+            await _run_pipeline(client, conn, state, limit=limit)
         except KeyboardInterrupt:
             logger.warning("Graceful shutdown — saving checkpoint...")
         except Exception:
             logger.exception("Pipeline error")
         finally:
             with contextlib.suppress(Exception):
-                export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-            _save_ckpt(ckpt)
+                export_all_articles(conn, EXPORT_PATH)
+            state.save_ckpt()
             conn.close()
             logger.info("=== dergipark-miner finished ===")
 
@@ -228,14 +271,8 @@ async def run(limit: int = 0) -> None:
 async def _run_pipeline(
     client: httpx.AsyncClient,
     conn,
-    ckpt: dict,
+    state: PipelineState,
     *,
-    processed_shortnames: list[str],
-    failed_journals: dict[str, str],
-    failed_articles: list[dict],
-    processed_articles: int,
-    pdf_downloaded: int,
-    pdf_failed: int,
     limit: int,
 ) -> None:
     """Core pipeline logic. Can be interrupted gracefully."""
@@ -259,24 +296,24 @@ async def _run_pipeline(
     _check_shutdown()
 
     # Skip already-processed journals from checkpoint
-    remaining = [j for j in all_journals if j["short_name"] not in processed_shortnames]
-    if processed_shortnames:
+    remaining = [j for j in all_journals if j["short_name"] not in state.processed_shortnames]
+    if state.processed_shortnames:
         logger.info(
             "Checkpoint: {} journals to skip, {} journals to process",
-            len(processed_shortnames),
+            len(state.processed_shortnames),
             len(remaining),
         )
 
     # Adaptive delay tracker (shared for OAI-PMH + PDF)
-    adaptive_delay = AdaptiveDelay(
+    state.adaptive_delay = AdaptiveDelay(
         default=2.0,
         min_delay=2.0,
         max_delay=60.0,
         backoff_factor=2.0,
         decay_factor=0.9,
     )
-    if ckpt.get("adaptive_delays"):
-        adaptive_delay = AdaptiveDelay.from_dict(ckpt["adaptive_delays"])
+    if state.ckpt.get("adaptive_delays"):
+        state.adaptive_delay = AdaptiveDelay.from_dict(state.ckpt["adaptive_delays"])
 
     # 3. OAI-PMH harvest + parse + insert (streaming)
     remaining_names = [j["short_name"] for j in remaining]
@@ -287,8 +324,8 @@ async def _run_pipeline(
 
     def _audit_journal(conn, shortname: str) -> list[str]:
         """Check DB vs expected count. Return missing oai_identifiers."""
-        expected = harvested_count.get(shortname, 0)
-        h_ids = harvested_ids.get(shortname, set())
+        expected = state.harvested_count.get(shortname, 0)
+        h_ids = state.harvested_ids.get(shortname, set())
         row = conn.execute(
             "SELECT j.id FROM journals j WHERE j.short_name = ?", (shortname,)
         ).fetchone()
@@ -313,15 +350,14 @@ async def _run_pipeline(
                 len(missing),
                 missing[:10],
             )
-        harvested_count.pop(shortname, None)
-        harvested_ids.pop(shortname, None)
+        state.harvested_count.pop(shortname, None)
+        state.harvested_ids.pop(shortname, None)
         return missing
 
     def on_journal_done(
         shortname: str, xml_pages: list[str], success: bool = True, flushed_count: int = 0
     ) -> None:
         """Called when each journal harvest completes: process remaining pages + audit + export."""
-        nonlocal processed_articles, failed_articles
         # Process remaining unflushed pages (flushed pages were popped by on_page_done)
         journal_article_count = 0
         for xml_text in xml_pages:
@@ -329,19 +365,19 @@ async def _run_pipeline(
                 try:
                     meta = parse_article_metadata(record_xml)
                     insert_article(conn, meta)
-                    processed_articles += 1
+                    state.processed_articles += 1
                     journal_article_count += 1
                     oid = meta.get("oai_identifier", "")
                     if oid:
-                        harvested_ids.setdefault(shortname, set()).add(oid)
+                        state.harvested_ids.setdefault(shortname, set()).add(oid)
                 except Exception as exc:
-                    failed_articles.append({"shortname": shortname, "error": str(exc)})
+                    state.failed_articles.append({"shortname": shortname, "error": str(exc)})
 
-        harvested_count[shortname] = harvested_count.get(shortname, 0) + journal_article_count
+        state.harvested_count[shortname] = state.harvested_count.get(shortname, 0) + journal_article_count
 
         # Trim failed_articles
-        if len(failed_articles) > 100:
-            failed_articles = failed_articles[-100:]
+        if len(state.failed_articles) > MAX_FAILED_ARTICLES:
+            state.failed_articles = state.failed_articles[-MAX_FAILED_ARTICLES:]
 
         conn.commit()
 
@@ -354,43 +390,25 @@ async def _run_pipeline(
                     shortname,
                     len(missing),
                 )
-                if shortname not in failed_journals:
-                    failed_journals[shortname] = f"audit: {len(missing)} missing"
+                if shortname not in state.failed_journals:
+                    state.failed_journals[shortname] = f"audit: {len(missing)} missing"
             else:
-                processed_shortnames.append(shortname)
-                if shortname in failed_journals:
-                    del failed_journals[shortname]
-                resume_tokens.pop(shortname, None)
+                state.processed_shortnames.append(shortname)
+                if shortname in state.failed_journals:
+                    del state.failed_journals[shortname]
+                state.resume_tokens.pop(shortname, None)
                 update_journal_article_count(conn, shortname, journal_article_count)
         else:
-            if shortname not in failed_journals:
-                failed_journals[shortname] = (
-                    "harvest failed" if not success else "no records returned"
-                )
+            if shortname not in state.failed_journals:
+                state.failed_journals[shortname] = "harvest failed"
             # Cleanup memory for failed journals
-            harvested_count.pop(shortname, None)
-            harvested_ids.pop(shortname, None)
+            state.harvested_count.pop(shortname, None)
+            state.harvested_ids.pop(shortname, None)
 
-        ckpt.update(
-            {
-                "processed_shortnames": processed_shortnames,
-                "processed_articles": processed_articles,
-                "failed_journals": failed_journals,
-                "failed_articles": failed_articles,
-                "adaptive_delays": adaptive_delay.to_dict(),
-                "resume_tokens": resume_tokens,
-            }
-        )
-        _save_ckpt(ckpt)
-
-    # Resume tokens for crash recovery
-    resume_tokens: dict[str, str] = ckpt.get("resume_tokens", {})
-    harvested_count: dict[str, int] = {}  # shortname → expected article count
-    harvested_ids: dict[str, set[str]] = {}  # shortname → set of oai_identifiers parsed
+        state.save_ckpt()
 
     def on_page_done(shortname: str, token: str, collected: int, xml_pages: list[str]) -> None:
         """Flush latest page to DB + save resumption token for crash recovery."""
-        nonlocal processed_articles, failed_articles
         if xml_pages:
             last_page = xml_pages.pop(0)
             page_count = 0
@@ -399,21 +417,21 @@ async def _run_pipeline(
                 try:
                     meta = parse_article_metadata(record_xml)
                     insert_article(conn, meta)
-                    processed_articles += 1
+                    state.processed_articles += 1
                     page_count += 1
                     oid = meta.get("oai_identifier", "")
                     if oid:
                         page_ids.add(oid)
                 except Exception as exc:
-                    failed_articles.append({"shortname": shortname, "error": str(exc)})
-                    if len(failed_articles) > 100:
-                        failed_articles = failed_articles[-100:]
-            harvested_count[shortname] = harvested_count.get(shortname, 0) + page_count
-            harvested_ids.setdefault(shortname, set()).update(page_ids)
+                    state.failed_articles.append({"shortname": shortname, "error": str(exc)})
+                    if len(state.failed_articles) > MAX_FAILED_ARTICLES:
+                        state.failed_articles = state.failed_articles[-MAX_FAILED_ARTICLES:]
+            state.harvested_count[shortname] = state.harvested_count.get(shortname, 0) + page_count
+            state.harvested_ids.setdefault(shortname, set()).update(page_ids)
             conn.commit()
-        resume_tokens[shortname] = token
-        ckpt["resume_tokens"] = resume_tokens
-        _save_ckpt(ckpt)
+        state.resume_tokens[shortname] = token
+        state.ckpt["resume_tokens"] = state.resume_tokens
+        _save_ckpt(state.ckpt)
 
     try:
         await harvest_all_journals(
@@ -422,22 +440,22 @@ async def _run_pipeline(
             concurrency=1,
             max_records_per_journal=max_per_journal,
             inter_request_delay=2.0,
-            adaptive_delay=adaptive_delay,
+            adaptive_delay=state.adaptive_delay,
             on_journal_done=on_journal_done,
             on_page_done=on_page_done,
-            resume_tokens=resume_tokens,
+            resume_tokens=state.resume_tokens,
         )
-        logger.info("Harvest done: {} articles total", processed_articles)
+        logger.info("Harvest done: {} articles total", state.processed_articles)
     except Exception:
         logger.exception("Harvest failed")
 
     _check_shutdown()
 
     # Journal retry: retry failed journals up to 3 rounds (like PDF retry)
-    for journal_retry_round in range(1, 4):
+    for journal_retry_round in range(1, JOURNAL_RETRY_ROUNDS + 1):
         if _shutdown_requested:
             break
-        retry_journals = [s for s in failed_journals if s not in processed_shortnames]
+        retry_journals = [s for s in state.failed_journals if s not in state.processed_shortnames]
         if not retry_journals:
             break
         logger.info(
@@ -455,31 +473,31 @@ async def _run_pipeline(
                 concurrency=1,
                 max_records_per_journal=max_per_journal,
                 inter_request_delay=2.0,
-                adaptive_delay=adaptive_delay,
+                adaptive_delay=state.adaptive_delay,
                 on_journal_done=on_journal_done,
                 on_page_done=on_page_done,
-                resume_tokens=resume_tokens,
+                resume_tokens=state.resume_tokens,
             )
         except Exception:
             logger.exception("Journal retry round {} failed", journal_retry_round)
-        _save_ckpt(ckpt)
+        state.save_ckpt()
 
     # Mark remaining journals as incomplete
     for shortname in remaining_names:
-        if shortname not in processed_shortnames and shortname not in failed_journals:
-            failed_journals[shortname] = "harvest incomplete"
+        if shortname not in state.processed_shortnames and shortname not in state.failed_journals:
+            state.failed_journals[shortname] = "harvest incomplete"
 
     # Trim failed_journals (keep checkpoint size small)
-    if len(failed_journals) > 100:
-        sorted_keys = sorted(failed_journals.keys())
-        failed_journals = {k: failed_journals[k] for k in sorted_keys[-100:]}
+    if len(state.failed_journals) > MAX_FAILED_JOURNALS:
+        sorted_keys = sorted(state.failed_journals.keys())
+        state.failed_journals = {k: state.failed_journals[k] for k in sorted_keys[-MAX_FAILED_JOURNALS:]}
 
-    _save_ckpt(ckpt)
+    state.save_ckpt()
 
     # 3b. Export after harvest (before PDF download)
     try:
-        export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-        logger.info("Post-harvest export done: data/exports/all_articles.jsonl")
+        export_all_articles(conn, EXPORT_PATH)
+        logger.info("Post-harvest export done: {}", EXPORT_PATH)
     except Exception:
         logger.exception("Post-harvest export error")
 
@@ -504,8 +522,7 @@ async def _run_pipeline(
             article_url = (
                 f"https://dergipark.org.tr/tr/pub/{journal}/article/{oai_id.split('/')[-1]}"
             )
-            max_immediate_retries = 3
-            for attempt in range(max_immediate_retries):
+            for attempt in range(MAX_IMMEDIATE_RETRIES):
                 try:
                     # Fetch article page once: extract PDF URL + metadata
                     resp = await client.get(
@@ -546,21 +563,21 @@ async def _run_pipeline(
                     ok = await download_pdf(client, pdf_url, pdf_path)
                     if ok:
                         remove_pdf_error(oai_id)
-                        adaptive_delay.on_success(journal)
+                        state.adaptive_delay.on_success(journal)
                         return True, False
                     log_pdf_error(oai_id, article_url, "PDF download failed")
                     return False, True
                 except httpx.HTTPStatusError as exc:
                     is_transient = exc.response.status_code in (429, 500, 502, 503)
                     if exc.response.status_code == 429:
-                        adaptive_delay.on_429(journal)
-                        if attempt < max_immediate_retries - 1:
-                            current_delay = adaptive_delay.get(journal)
+                        state.adaptive_delay.on_429(journal)
+                        if attempt < MAX_IMMEDIATE_RETRIES - 1:
+                            current_delay = state.adaptive_delay.get(journal)
                             wait = current_delay * (attempt + 1)
                             logger.warning(
                                 "429 on PDF (attempt {}/{}), retry in {:.1f}s",
                                 attempt + 1,
-                                max_immediate_retries,
+                                MAX_IMMEDIATE_RETRIES,
                                 wait,
                             )
                             await asyncio.sleep(wait)
@@ -578,37 +595,28 @@ async def _run_pipeline(
             return False, True
 
         async def _do_download(oai_id: str, journal: str, pdf_path: Path) -> None:
-            nonlocal pdf_downloaded, pdf_failed, pdf_counter
+            nonlocal pdf_counter
             downloaded, failed = await _download_one(oai_id, journal, pdf_path)
-            pdf_downloaded += downloaded
+            state.pdf_downloaded += downloaded
             if failed and oai_id not in _failed_set:
-                pdf_failed += 1
+                state.pdf_failed += 1
                 _failed_set.add(oai_id)
             pdf_counter += 1
             if pdf_counter % pdf_checkpoint_interval == 0:
-                ckpt["pdf_downloaded"] = pdf_downloaded
-                ckpt["pdf_failed"] = pdf_failed
-                ckpt["adaptive_delays"] = adaptive_delay.to_dict()
-                _save_ckpt(ckpt)
+                state.save_ckpt()
             _check_shutdown()
-            await asyncio.sleep(adaptive_delay.get(journal))
+            await asyncio.sleep(state.adaptive_delay.get(journal))
 
         # Retry previously failed PDFs first
         for entry in pdf_errors_cache[:]:
             oai_id = entry.get("oai_id", "")
-            if is_permanently_failed(oai_id, max_retries=10, cache=pdf_errors_cache):
+            if is_permanently_failed(oai_id, max_retries=MAX_PDF_RETRIES, cache=pdf_errors_cache):
                 continue
-            row = conn.execute(
-                "SELECT a.id, j.short_name FROM articles a "
-                "JOIN journals j ON a.journal_id = j.id "
-                "WHERE a.oai_identifier = ?",
-                (oai_id,),
-            ).fetchone()
+            row = lookup_article_by_oai(conn, oai_id)
             if not row:
                 continue
             _, journal = row
-            safe_name = oai_id.replace("/", "_") + ".pdf"
-            pdf_path = Path("data/raw_pdfs") / safe_name
+            pdf_path = pdf_destination(oai_id)
             if pdf_path.exists():
                 remove_pdf_error(oai_id)
                 continue
@@ -622,22 +630,19 @@ async def _run_pipeline(
             for _article_id, oai_id, journal in batch:
                 if not oai_id:
                     continue
-                safe_name = oai_id.replace("/", "_") + ".pdf"
-                pdf_path = Path("data/raw_pdfs") / safe_name
+                pdf_path = pdf_destination(oai_id)
                 if pdf_path.exists():
                     remove_pdf_error(oai_id)
                     continue
-                if is_permanently_failed(oai_id, max_retries=10, cache=pdf_errors_cache):
+                if is_permanently_failed(oai_id, max_retries=MAX_PDF_RETRIES, cache=pdf_errors_cache):
                     continue
                 await _do_download(oai_id, journal, pdf_path)
 
-        ckpt["pdf_downloaded"] = pdf_downloaded
-        ckpt["pdf_failed"] = pdf_failed
-        _save_ckpt(ckpt)
-        logger.info("PDF download: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
+        state.save_ckpt()
+        logger.info("PDF download: {} succeeded, {} failed", state.pdf_downloaded, state.pdf_failed)
 
         # Retry loop: retry transient failures up to 5 more rounds
-        for retry_round in range(1, 6):
+        for retry_round in range(1, PDF_RETRY_ROUNDS + 1):
             if _shutdown_requested:
                 break
             pdf_errors_cache = load_pdf_errors()  # Reload after each round
@@ -645,9 +650,9 @@ async def _run_pipeline(
                 e
                 for e in pdf_errors_cache
                 if not is_permanently_failed(
-                    e.get("oai_id", ""), max_retries=10, cache=pdf_errors_cache
+                    e.get("oai_id", ""), max_retries=MAX_PDF_RETRIES, cache=pdf_errors_cache
                 )
-                and e.get("retry_count", 0) < 10
+                and e.get("retry_count", 0) < MAX_PDF_RETRIES
             ]
             if not retry_candidates:
                 break
@@ -659,26 +664,18 @@ async def _run_pipeline(
                 if _shutdown_requested:
                     break
                 oai_id = entry.get("oai_id", "")
-                row = conn.execute(
-                    "SELECT a.id, j.short_name FROM articles a "
-                    "JOIN journals j ON a.journal_id = j.id "
-                    "WHERE a.oai_identifier = ?",
-                    (oai_id,),
-                ).fetchone()
+                row = lookup_article_by_oai(conn, oai_id)
                 if not row:
                     continue
                 _, journal = row
-                safe_name = oai_id.replace("/", "_") + ".pdf"
-                pdf_path = Path("data/raw_pdfs") / safe_name
+                pdf_path = pdf_destination(oai_id)
                 if pdf_path.exists():
                     remove_pdf_error(oai_id)
                     continue
                 await _do_download(oai_id, journal, pdf_path)
 
-        ckpt["pdf_downloaded"] = pdf_downloaded
-        ckpt["pdf_failed"] = pdf_failed
-        _save_ckpt(ckpt)
-        logger.info("PDF final: {} succeeded, {} failed", pdf_downloaded, pdf_failed)
+        state.save_ckpt()
+        logger.info("PDF final: {} succeeded, {} failed", state.pdf_downloaded, state.pdf_failed)
     except Exception:
         logger.exception("PDF download error")
 
@@ -686,8 +683,8 @@ async def _run_pipeline(
 
     # 5. Export
     try:
-        export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-        logger.info("Export done: data/exports/all_articles.jsonl")
+        export_all_articles(conn, EXPORT_PATH)
+        logger.info("Export done: {}", EXPORT_PATH)
     except Exception:
         logger.exception("Export error")
 
