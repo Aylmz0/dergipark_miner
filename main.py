@@ -174,9 +174,13 @@ async def run(limit: int = 0) -> None:
     setup_logger()
     logger.info("=== dergipark-miner started ===")
 
+    # 1. Database (init first — needed for checkpoint reload)
+    db_path = Path("data/Sobiad_Mining.sqlite")
+    conn = init_db(db_path)
+    logger.info("Database ready: {}", db_path)
+
     # Checkpoint yukle
     ckpt = load_checkpoint(CHECKPOINT_PATH)
-    discovered_journals: list[str] = ckpt.get("discovered_journals", [])
     processed_shortnames: list[str] = ckpt.get("processed_shortnames", [])
     failed_journals: dict[str, str] = ckpt.get("failed_journals", {})
     failed_articles: list[dict] = ckpt.get("failed_articles", [])
@@ -186,16 +190,10 @@ async def run(limit: int = 0) -> None:
 
     if processed_shortnames:
         logger.info(
-            "Checkpoint loaded: {} journals discovered, {} processed, {} articles",
-            len(discovered_journals),
+            "Checkpoint loaded: {} processed, {} articles",
             len(processed_shortnames),
             processed_articles,
         )
-
-    # 1. Database
-    db_path = Path("data/Sobiad_Mining.sqlite")
-    conn = init_db(db_path)
-    logger.info("Database ready: {}", db_path)
 
     async with httpx.AsyncClient(
         follow_redirects=True,
@@ -207,7 +205,6 @@ async def run(limit: int = 0) -> None:
                 client,
                 conn,
                 ckpt,
-                discovered_journals=discovered_journals,
                 processed_shortnames=processed_shortnames,
                 failed_journals=failed_journals,
                 failed_articles=failed_articles,
@@ -231,7 +228,6 @@ async def _run_pipeline(
     conn,
     ckpt: dict,
     *,
-    discovered_journals: list[str],
     processed_shortnames: list[str],
     failed_journals: dict[str, str],
     failed_articles: list[dict],
@@ -245,18 +241,17 @@ async def _run_pipeline(
     # 2. Discover journals (auto-pagination)
     try:
         all_journals = await fetch_journals(client)
-        discovered_journals = [j["short_name"] for j in all_journals]
         insert_journals(conn, all_journals)
-        ckpt["discovered_journals"] = discovered_journals
-        _save_ckpt(ckpt)
         logger.info("Journal list: {} journals found, saved to DB", len(all_journals))
     except Exception:
         logger.exception("Failed to fetch journal list")
-        if discovered_journals:
-            logger.warning("Using {} journals from checkpoint", len(discovered_journals))
-            all_journals = [{"short_name": s, "name": ""} for s in discovered_journals]
+        # Reload from DB if fetch fails
+        rows = conn.execute("SELECT short_name FROM journals").fetchall()
+        if rows:
+            all_journals = [{"short_name": r[0], "name": ""} for r in rows]
+            logger.warning("Using {} journals from DB", len(all_journals))
         else:
-            logger.error("Failed to fetch journals and no checkpoint data, exiting")
+            logger.error("Failed to fetch journals and no DB data, exiting")
             return
 
     _check_shutdown()
@@ -365,15 +360,14 @@ async def _run_pipeline(
                     del failed_journals[shortname]
                 resume_tokens.pop(shortname, None)
                 update_journal_article_count(conn, shortname, journal_article_count)
-                try:
-                    export_all_articles(conn, Path("data/exports/all_articles.jsonl"))
-                except Exception:
-                    logger.exception("Incremental export error")
         else:
             if shortname not in failed_journals:
                 failed_journals[shortname] = (
                     "harvest failed" if not success else "no records returned"
                 )
+            # Cleanup memory for failed journals
+            harvested_count.pop(shortname, None)
+            harvested_ids.pop(shortname, None)
 
         ckpt.update(
             {
@@ -410,6 +404,8 @@ async def _run_pipeline(
                         page_ids.add(oid)
                 except Exception as exc:
                     failed_articles.append({"shortname": shortname, "error": str(exc)})
+                    if len(failed_articles) > 100:
+                        failed_articles = failed_articles[-100:]
             harvested_count[shortname] = harvested_count.get(shortname, 0) + page_count
             harvested_ids.setdefault(shortname, set()).update(page_ids)
             conn.commit()
@@ -434,6 +430,37 @@ async def _run_pipeline(
         logger.exception("Harvest failed")
 
     _check_shutdown()
+
+    # Journal retry: retry failed journals up to 3 rounds (like PDF retry)
+    for journal_retry_round in range(1, 4):
+        if _shutdown_requested:
+            break
+        retry_journals = [s for s in failed_journals if s not in processed_shortnames]
+        if not retry_journals:
+            break
+        logger.info(
+            "Journal retry round {}/3: {} journals ({})",
+            journal_retry_round,
+            len(retry_journals),
+            retry_journals[:5],
+        )
+        round_wait = 15 + journal_retry_round * 15
+        await asyncio.sleep(round_wait)
+        try:
+            await harvest_all_journals(
+                client,
+                retry_journals,
+                concurrency=1,
+                max_records_per_journal=max_per_journal,
+                inter_request_delay=2.0,
+                adaptive_delay=adaptive_delay,
+                on_journal_done=on_journal_done,
+                on_page_done=on_page_done,
+                resume_tokens=resume_tokens,
+            )
+        except Exception:
+            logger.exception("Journal retry round {} failed", journal_retry_round)
+        _save_ckpt(ckpt)
 
     # Mark remaining journals as incomplete
     for shortname in remaining_names:

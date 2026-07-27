@@ -37,6 +37,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
 
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
 
     conn.executescript(
         """
