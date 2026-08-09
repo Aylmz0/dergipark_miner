@@ -1,51 +1,31 @@
-/* Dergipark Miner — design system over Pico v2: 90's academic/paper web */
+/* Dergipark Miner — Paper Academic 90s over Pico v2 */
 
-:root {
-    /* 90s Academic/Paper Web Palette */
-    --pico-background-color: #fdfbf7;      /* Fildişi / Kitap kağıdı beji */
-    --pico-color: #1f2937;                 /* Koyu mürekkep metin */
+:root:not([data-theme="dark"]), :root[data-theme="light"] {
+    /* Paper Academic 90s Palette */
+    --pico-background-color: #f6f1e6;      /* Yumuşak krem / fildişi zemin */
+    --pico-color: #2b2620;                 /* Kahve-siyah mürekkep */
     --pico-primary: #1a56db;               /* Klasik hiperlink mavisi */
     --pico-primary-background: #1a56db;
-    --pico-muted-color: #4b5563;           /* İkincil / Yardımcı metin */
-    --pico-border-color: #d1d5db;          /* Net ayrım çizgileri */
+    --pico-muted-color: #6b6150;           /* Soluk mürekkep */
+    --pico-border-color: #c9bfa6;          /* Bronz / kül-bronz ayraç */
 
-    /* Tipografi */
-    --pico-font-family: system-ui, -apple-system, "Segoe UI", Roboto, Georgia, serif;
+    /* Tipografi: tam serif, scholarly paper */
+    --pico-font-family: Georgia, "Times New Roman", "Nimbus Roman", "Liberation Serif", serif;
     --pico-font-size: 15px;
 
-    /* Bileşen köprüleri (aynı paletin türevleri) */
-    --pico-card-background-color: #ffffff;
-    --pico-muted-border-color: #d1d5db;
+    /* Bileşen köprüleri */
+    --pico-card-background-color: #efe9d8; /* Kart ~ zeminle bütün (kağıt) */
+    --pico-muted-border-color: #d3c9b3;
     --pico-primary-border: #1a56db;
-    --pico-primary-hover: #1549c0;
-    --pico-primary-focus: rgba(26, 86, 219, 0.18);
-    --pico-form-element-background-color: #ffffff;
-    --pico-form-element-border-color: #d1d5db;
+    --pico-primary-hover: #0f3fa8;
+    --pico-primary-focus: rgba(26, 86, 219, 0.16);
+    --pico-form-element-background-color: #fbf7ec;
+    --pico-form-element-border-color: #c9bfa6;
 
-    --panel-radius: 0.5rem;
+    --panel-radius: 0.25rem;               /* sert, köşeli hatlar */
     --panel-gap: 0.75rem;
     --panel-max-width: 920px;
     --pico-container-max-width: 920px;
-}
-
-@media (prefers-color-scheme: dark) {
-    :root {
-        /* Dark Mode (Amber Terminal Dokunuşu) */
-        --pico-background-color: #12131c;
-        --pico-color: #e2e8f0;
-        --pico-primary: #f59e0b;            /* Amber vurgu */
-        --pico-primary-background: #f59e0b;
-        --pico-muted-color: #94a3b8;
-        --pico-border-color: #1e293b;
-
-        --pico-card-background-color: #171926;
-        --pico-muted-border-color: #2a3040;
-        --pico-primary-border: #f59e0b;
-        --pico-primary-hover: #fbbf24;
-        --pico-primary-focus: rgba(245, 158, 11, 0.2);
-        --pico-form-element-background-color: #171926;
-        --pico-form-element-border-color: #2a3040;
-    }
 }
 
 html { font-size: 0.9375rem; }
@@ -57,6 +37,11 @@ h1, h2, h3 { margin-bottom: 0.6rem; }
 
 main, nav { max-width: var(--panel-max-width); margin-inline: auto; }
 main { padding: 0 var(--pico-spacing, 1rem) 1.5rem; }
+
+/* Klasik 90s linkler: alt çizili; logo ve badge istisna */
+a { text-decoration: underline; text-underline-offset: 2px; }
+.brand-link, .badge, .badge a,
+.pager a[role="button"], a[aria-current="page"] { text-decoration: none; }
 
 .mono {
     font-family: var(--pico-font-family-monospace, ui-monospace, "Cascadia Mono", "Segoe Mono", monospace);
@@ -70,11 +55,14 @@ main { padding: 0 var(--pico-spacing, 1rem) 1.5rem; }
     flex-shrink: 0;
 }
 
-/* ---------- Navbar: no overflow, brand | search | links ---------- */
+/* ---------- Navbar: no overflow, ink divider under ---------- */
 nav {
     flex-wrap: wrap;
     row-gap: 0.4rem;
     padding-top: 0.55rem;
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--pico-muted-border-color);
+    margin-bottom: 1rem;
 }
 nav ul { flex-wrap: wrap; align-items: center; margin: 0; }
 nav ul:last-child { margin-left: auto; }
@@ -87,8 +75,8 @@ nav a[aria-current="page"] { color: var(--pico-primary); font-weight: 600; }
     gap: 0.4rem;
     font-weight: 800;
     font-size: 0.98rem;
+    font-family: var(--pico-font-family);
     letter-spacing: 0.01em;
-    text-decoration: none;
 }
 
 /* Search pill: one icon only, native chrome decoration removed */
@@ -107,10 +95,10 @@ nav a[aria-current="page"] { color: var(--pico-primary); font-weight: 600; }
     width: clamp(180px, 24vw, 340px);
     margin: 0;
     padding: 0.32rem 0.9rem 0.32rem 2.1rem;
-    border-radius: 999px;
+    border-radius: 0.3rem;              /* köşeli, 90s input */
     font-size: 0.85rem;
     background: var(--pico-form-element-background-color);
-    border-color: var(--pico-form-element-border-color);
+    border: 1px solid var(--pico-form-element-border-color);
 }
 .nav-search input[type="search"]:focus {
     border-color: var(--pico-primary);
@@ -158,7 +146,7 @@ input[type="search"]::-webkit-search-cancel-button {
     gap: 0.5rem;
     margin-bottom: 0.5rem;
 }
-.filter-row input[type="search"] { flex: 1 1 240px; margin: 0; }
+.filter-row input[type="search"] { flex: 1 1 240px; margin: 0; border-radius: 0.25rem; }
 .filter-row select { width: auto; margin: 0; padding: 0.35rem 2rem 0.35rem 0.7rem; font-size: 0.85rem; }
 .filter-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.2rem; }
 .filter-opts label { display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; font-size: 0.85rem; }
@@ -189,7 +177,7 @@ input[type="search"]::-webkit-search-cancel-button {
     font-size: 0.82rem;
     color: var(--pico-muted-color);
 }
-.result-meta a { color: inherit; text-decoration: none; }
+.result-meta a { color: inherit; }
 .result-meta a:hover { color: var(--pico-primary); }
 .result-snippet {
     margin: 0.1rem 0 0;
@@ -215,7 +203,7 @@ input[type="search"]::-webkit-search-cancel-button {
     max-width: 100%;
     padding: 0.06rem 0.55rem;
     border: 1px solid var(--pico-muted-border-color);
-    border-radius: 999px;
+    border-radius: 0.2rem;              /* sert köşeli, 90s chip */
     font-size: 0.68rem;
     font-weight: 600;
     letter-spacing: 0.03em;
