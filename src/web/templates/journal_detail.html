@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}{{ journal.name or journal.short_name }} — Dergipark Miner{% endblock %}
+{% block content %}
+<p><a href="/journals">← Dergiler</a></p>
+<article>
+    <header><h2>{{ journal.name or journal.short_name }}</h2></header>
+    <p class="mono">short_name: {{ journal.short_name }}</p>
+    <div class="stat-grid">
+        <div class="stat-card"><div class="value">{{ journal.article_count }}</div><div class="label">Deklare Makale</div></div>
+        <div class="stat-card"><div class="value">{{ journal.harvested }}</div><div class="label">Hasat Edilen</div></div>
+        <div class="stat-card"><div class="value">{{ journal.pdfs }}</div><div class="label">PDF</div></div>
+    </div>
+</article>
+
+<h3>Makaleler ({{ pg.total }})</h3>
+<div id="journal-articles">
+    {% set base_url = "/journals/" ~ journal.short_name ~ "?" %}
+    {% set target = "#journal-articles" %}
+    {% include "partials/article_rows.html" %}
+</div>
+{% endblock %}

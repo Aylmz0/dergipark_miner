@@ -1,0 +1,33 @@
+{% if rows %}
+<table>
+    <thead>
+        <tr><th>Yıl</th><th>Başlık</th><th>Dil</th><th>OA</th><th>PDF</th></tr>
+    </thead>
+    <tbody>
+    {% for a in rows %}
+        <tr>
+            <td class="mono">{{ (a.publication_date or "")[:4] or "—" }}</td>
+            <td class="wrap"><a href="/articles/{{ a.id }}">{{ a.title or "—" }}</a></td>
+            <td>{{ a.language or "" }}</td>
+            <td>{% if a.is_oa %}✅{% else %}—{% endif %}</td>
+            <td>{% if a.pdf_url %}📄{% else %}—{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="muted">Sonuç bulunamadı.</p>
+{% endif %}
+{% if pg.pages > 1 %}
+<nav aria-label="Sayfa">
+    <ul>
+        <li>
+            <a role="button" class="secondary" {% if pg.page > 1 %}hx-get="{{ base_url }}&page={{ pg.page - 1 }}" hx-target="{{ target }}"{% else %}aria-disabled="true"{% endif %}>← Önceki</a>
+        </li>
+        <li><small class="muted">{{ pg.page }} / {{ pg.pages }}</small></li>
+        <li>
+            <a role="button" class="secondary" {% if pg.page < pg.pages %}hx-get="{{ base_url }}&page={{ pg.page + 1 }}" hx-target="{{ target }}"{% else %}aria-disabled="true"{% endif %}>Sonraki →</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}

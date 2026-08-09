@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Panel — Dergipark Miner{% endblock %}
+{% block content %}
+<article>
+    <header><h2>Genel Durum</h2></header>
+    <div class="stat-grid">
+        <div class="stat-card"><div class="value">{{ stats.total_journals }}</div><div class="label">Toplam Dergi</div></div>
+        <div class="stat-card"><div class="value">{{ stats.total_articles }}</div><div class="label">Toplam Makale</div></div>
+        <div class="stat-card"><div class="value">{{ stats.journals_with_articles }}</div><div class="label">Hasat Edilen Dergi</div></div>
+        <div class="stat-card"><div class="value">{{ stats.open_access }}</div><div class="label">Açık Erişim (OA)</div></div>
+        <div class="stat-card"><div class="value">{{ stats.with_pdf }}</div><div class="label">PDF İndirilen</div></div>
+        <div class="stat-card"><div class="value">{{ stats.with_doi }}</div><div class="label">DOI'lu</div></div>
+        <div class="stat-card"><div class="value">{{ stats.enriched }}</div><div class="label">Zenginleştirilmiş</div></div>
+    </div>
+    {% if stats.date_min %}
+    <p class="muted">Yayın aralığı: <span class="mono">{{ stats.date_min }}</span> → <span class="mono">{{ stats.date_max }}</span></p>
+    {% endif %}
+</article>
+
+<div class="stat-grid">
+    <div class="stat-card">
+        <div class="value">{{ ckpt.processed_shortnames|length }}</div>
+        <div class="label">İşlenen Dergi</div>
+        <small class="muted">Checkpoint: {{ ckpt.updated_at or "—" }}</small>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ ckpt.processed_articles }}</div>
+        <div class="label">Checkpoint Toplam Makale</div>
+    </div>
+<div class="stat-card">
+        <div class="value">{{ ckpt.pdf_downloaded }}</div>
+        <div class="label">Checkpoint PDF İndirilen</div>
+        <small class="muted">{{ ckpt.pdf_failed }} hata</small>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ ckpt.failed_journals|length }}</div>
+        <div class="label">Başarısız Dergi</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ ckpt.resume_tokens|length }}</div>
+        <div class="label">Resume Token</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ export_.size_mb or 0 }} MB</div>
+        <div class="label">JSONL Export</div>
+        <small class="muted">{{ export_.modified or "yok" }}</small>
+    </div>
+</div>
+
+<section>
+    <h3>Son Hasat Edilen Dergiler</h3>
+    {% if recent_rows %}
+    <table>
+        <thead><tr><th>Dergi</th><th>Makale</th><th>PDF</th><th>Son Yayın</th></tr></thead>
+        <tbody>
+        {% for j in recent_rows %}
+            <tr>
+                <td><a href="/journals/{{ j.short_name }}">{{ j.name or j.short_name }}</a></td>
+                <td>{{ j.harvested }}</td>
+                <td>{{ j.pdfs }}</td>
+                <td class="mono">{{ j.latest_date or "—" }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Henüz veri yok — ilk hasat başlatılmamış.</p>
+    {% endif %}
+    {% if pdfs.error_count %}
+    <p>⚠️ <a href="/failures">PDF hata kayıtları: {{ pdfs.error_count }}</a></p>
+    {% endif %}
+</section>
+{% endblock %}

@@ -112,3 +112,45 @@ dergipark_miner/
 ```
 
 59 test: crawler (metadata parsing, PDF error handling, HTML scraping), exporter (JSONL structure, sorting, idempotent), storage (upsert, content hash dedup, author write), utils (retry, checkpoint, AdaptiveDelay).
+
+## Web Paneli (İzleme Arayüzü)
+
+Miner'ın SQLite veritabanını okuyan salt-okunur FastAPI paneli: dashboard, dergi/makale listeleri, arama (Türkçe karakter duyarsız), hatalar ve JSONL export indirme. Miner çalışırken WAL sayesinde sorunsuz okur.
+
+```bash
+# Geliştirme
+uv run python -m src.web.app --port 8000
+# veya
+uv run uvicorn src.web.app:app --host 127.0.0.1 --port 8000
+```
+
+- Teknoloji: FastAPI + Jinja2 + HTMX + Alpine.js + Pico.css (vendor `static/vendor/` içinde, CDN yok)
+- Sayfalar: `/` dashboard · `/journals` dergiler · `/journals/{short_name}` dergi detayı · `/articles` makaleler (arama+filtre) · `/articles/{id}` makale detayı · `/failures` hatalar · `/exports` + `/api/export.jsonl` indirme · `/search` birleşik arama
+- Panel salt-okunurdur: DB'ye asla yazmaz (`mode=ro` URI), miner'a dokunmaz
+
+### Sunucuya Yükleme (Caddy + tmux)
+
+```bash
+# 1) Kod + veri (PDF'ler hariç) sunucuya rsync ile it
+rsync -avz --progress \
+  --exclude '.venv/' --exclude '.git/' --exclude '__pycache__/' \
+  --exclude 'graphify-out/' --exclude '.pytest_cache/' --exclude '.ruff_cache/' \
+  --exclude 'data/raw_pdfs/' --exclude 'data/parsed_jsons/' \
+  --exclude 'data/Sobiad_Mining.sqlite-wal' --exclude 'data/Sobiad_Mining.sqlite-shm' \
+  ./ yilmaz@SUNUCU:/home/yilmaz/dergipark-miner/
+
+# 2) Sunucuda
+cd /home/yilmaz/dergipark-miner
+uv sync                               # bağımlılıkları kurar (Python 3.14)
+tmux new -s miner-web
+uv run python -m src.web.app --port 8082   # 127.0.0.1'e bağlanır
+
+# 3) Caddyfile
+# dergipark.yilmazcs.xyz {
+#     reverse_proxy localhost:8082
+#     encode zstd gzip
+# }
+# caddy reload
+```
+
+Port 8082 örnek; Caddy yapılandırmanızda boş herhangi bir port olur. Doğrulama: `curl localhost:8082/healthz` → `{"ok": true, "db_exists": true}`.

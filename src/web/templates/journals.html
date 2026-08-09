@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Dergiler — Dergipark Miner{% endblock %}
+{% block content %}
+<h2>Dergiler</h2>
+<form hx-get="/journals" hx-target="#journal-rows" hx-push-url="true">
+    <input type="search" name="q" value="{{ q }}" placeholder="Dergi adı veya kısa ad ara..." hx-get="/journals" hx-target="#journal-rows" hx-trigger="input changed delay:400ms, search">
+</form>
+<details open>
+    <summary>{{ pg.total }} dergi bulundu · Sayfa {{ pg.page }}/{{ pg.pages }}</summary>
+    <div id="journal-rows">
+        {% include "partials/journal_rows.html" %}
+    </div>
+</details>
+{% endblock %}

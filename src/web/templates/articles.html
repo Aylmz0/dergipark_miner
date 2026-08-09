@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Makaleler — Dergipark Miner{% endblock %}
+{% block content %}
+<h2>Makaleler</h2>
+<form hx-get="/articles" hx-target="#article-rows" method="get">
+    <div class="grid">
+        <input type="search" name="q" value="{{ q }}" placeholder="Başlık / DOI / anahtar kelime / yazar ara..." hx-get="/articles" hx-target="#article-rows" hx-include="closest form" hx-trigger="input changed delay:400ms, search">
+        <select name="language" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+            <option value="">Tüm Diller</option>
+            {% for lang in lang_opts %}
+            <option value="{{ lang }}" {% if language == lang %}selected{% endif %}>{{ lang }}</option>
+            {% endfor %}
+        </select>
+        <select name="year" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+            <option value="">Tüm Yıllar</option>
+            {% for y in year_opts %}
+            <option value="{{ y }}" {% if year == y %}selected{% endif %}>{{ y }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div>
+        <label><input type="checkbox" name="oa" value="1" {% if oa %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece açık erişim</label>
+        <label><input type="checkbox" name="pdf" value="1" {% if pdf %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece PDF'li</label>
+    </div>
+</form>
+<p class="muted">{{ pg.total }} makale bulundu · Sayfa {{ pg.page }}/{{ pg.pages }}</p>
+<div id="article-rows">
+    {% set base_url = "/articles?q=" ~ (q or "")|urlencode ~ "&language=" ~ (language or "")|urlencode ~ "&oa=" ~ (oa or "")|urlencode ~ "&year=" ~ (year or "")|urlencode ~ "&pdf=" ~ (pdf or "")|urlencode %}
+    {% set target = "#article-rows" %}
+    {% include "partials/article_rows.html" %}
+</div>
+{% endblock %}

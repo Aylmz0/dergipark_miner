@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Export — Dergipark Miner{% endblock %}
+{% block content %}
+<h2>Veri Export</h2>
+
+{% if export_.exists %}
+<article>
+    <header><h3>all_articles.jsonl</h3></header>
+    <p><strong>Boyut:</strong> {{ export_.size_mb }} MB · <strong>Son güncelleme:</strong> <span class="mono">{{ export_.modified }}</span></p>
+    <p>Her satır bir makale; 22 alan (title, authors, abstract, keywords, DOI, is_oa, pdf_url, references vb.).</p>
+    <a role="button" href="/api/export.jsonl">⬇️ İndir ({{ export_.size_mb }} MB)</a>
+</article>
+{% else %}
+<p class="muted">Export dosyası henüz oluşturulmamış. İlk hasat sonrası <span class="mono">data/exports/all_articles.jsonl</span> altında oluşur.</p>
+{% endif %}
+
+<section>
+    <h3>İlgili Dosyalar</h3>
+    <table>
+        <tbody>
+            <tr><td>SQLite veritabanı</td><td class="mono">data/Sobiad_Mining.sqlite</td></tr>
+            <tr><td>Checkpoint</td><td class="mono">checkpoint.json</td></tr>
+            <tr><td>PDF hataları</td><td class="mono">data/pdf_errors.json</td></tr>
+            <tr><td>PDF arşivi</td><td class="mono">data/raw_pdfs/</td></tr>
+        </tbody>
+    </table>
+</section>
+{% endblock %}

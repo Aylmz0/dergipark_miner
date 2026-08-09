@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Arama — Dergipark Miner{% endblock %}
+{% block content %}
+<h2>Arama</h2>
+
+{% if not q %}
+<p class="muted">Dergi adı, makale başlığı, yazar, DOI veya anahtar kelime ara. Türkçe karakter duyarsızdır (İstanbul ↔ istanbul).</p>
+{% else %}
+<h3>Dergiler <small class="muted">({{ journal_total }})</small></h3>
+{% if journal_rows %}
+<table>
+    <thead><tr><th>Dergi</th><th>Kısa Ad</th><th>Makale</th><th>PDF</th></tr></thead>
+    <tbody>
+    {% for j in journal_rows %}
+        <tr>
+            <td><a href="/journals/{{ j.short_name }}">{{ j.name or j.short_name }}</a></td>
+            <td class="mono">{{ j.short_name }}</td>
+            <td>{{ j.harvested }}</td>
+            <td>{{ j.pdfs }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+    <p><a href="/journals?q={{ q|urlencode }}">Tüm dergileri gör →</a></p>
+{% elif journal_total == 0 %}
+<p class="muted">Dergi bulunamadı.</p>
+{% endif %}
+
+<h3>Makaleler <small class="muted">({{ article_total }})</small></h3>
+{% if article_rows %}
+<table>
+    <thead><tr><th>Yıl</th><th>Başlık</th><th>Dergi</th><th>PDF</th></tr></thead>
+    <tbody>
+    {% for a in article_rows %}
+        <tr>
+            <td class="mono">{{ (a.publication_date or "")[:4] or "—" }}</td>
+            <td class="wrap"><a href="/articles/{{ a.id }}">{{ a.title or "—" }}</a></td>
+            <td><a href="/journals/{{ a.short_name }}">{{ a.journal_name or a.short_name }}</a></td>
+            <td>{% if a.pdf_url %}📄{% else %}—{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+    <p><a href="/articles?q={{ q|urlencode }}">Tüm makaleleri gör →</a></p>
+{% elif article_total == 0 %}
+<p class="muted">Makale bulunamadı.</p>
+{% endif %}
+
+<h3>Yazarlar <small class="muted">({{ author_total }})</small></h3>
+{% if author_rows %}
+<ul>
+    {% for au in author_rows %}
+    <li><a href="/articles?q={{ au.name|urlencode }}">{{ au.name }}</a> <span class="muted">({{ au.article_count }} makale)</span></li>
+    {% endfor %}
+</ul>
+{% elif author_total == 0 %}
+<p class="muted">Yazar bulunamadı.</p>
+{% endif %}
+{% endif %}
+{% endblock %}
