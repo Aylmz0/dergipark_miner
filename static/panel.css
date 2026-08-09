@@ -11,7 +11,7 @@
 
     /* Tipografi: tam serif, scholarly paper */
     --pico-font-family: Georgia, "Times New Roman", "Nimbus Roman", "Liberation Serif", serif;
-    --pico-font-size: 15px;
+    --pico-font-size: 17px;
 
     /* Bileşen köprüleri */
     --pico-card-background-color: #efe9d8; /* Kart ~ zeminle bütün (kağıt) */
@@ -28,12 +28,15 @@
     --pico-container-max-width: 920px;
 }
 
-html { font-size: 0.9375rem; }
-h1 { font-size: 1.25rem; }
-h2 { font-size: 1.1rem; }
-h3 { font-size: 0.98rem; }
-h4 { font-size: 0.9rem; }
+html { font-size: 1.08rem; }
+body { line-height: 1.55; }
+h1 { font-size: 1.8rem; }
+h2 { font-size: 1.5rem; }
+h3 { font-size: 1.25rem; }
+h4 { font-size: 1.05rem; }
 h1, h2, h3 { margin-bottom: 0.6rem; }
+
+small, .text-sm, .badge, .table-wrap td, .table-wrap th { font-size: 0.85rem; }
 
 main, nav { max-width: var(--panel-max-width); margin-inline: auto; }
 main { padding: 0 var(--pico-spacing, 1rem) 1.5rem; }
@@ -246,4 +249,20 @@ details { margin-bottom: 0.9rem; }
 @media (max-width: 720px) {
     .grid-2 { grid-template-columns: 1fr !important; }
     nav ul:last-child { margin-left: 0; }
+}
+
+/* ---------- 90s cleanup: kill modern UI remnants ---------- */
+* { box-shadow: none !important; }
+article, input, select, button, textarea, .badge, .stat-card, .result-card,
+.nav-search input[type="search"], .pager a[role="button"] {
+    border-radius: 0 !important;
+}
+header, article, .result-card, .stat-card, form,
+.table-wrap, details, footer {
+    background-color: var(--pico-card-background-color) !important;
+    box-shadow: none !important;
+}
+:focus-visible {
+    outline: 2px solid var(--pico-primary);
+    outline-offset: 1px;
 }
