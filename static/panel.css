@@ -227,15 +227,42 @@ input[type="search"]::-webkit-search-cancel-button {
 .table-wrap thead th { white-space: nowrap; }
 
 /* ---------- Pagination ---------- */
+hr {
+    width: 100%;
+    margin: 0.9rem 0;
+    border: none;
+    border-top: 1px solid var(--pico-muted-border-color);
+}
 .pager {
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 0.4rem 0.9rem;
     flex-wrap: wrap;
-    margin: 0.9rem 0 0;
+    width: fit-content;
+    margin: 0.9rem auto 0;
 }
 .pager a[role="button"], .pager span { margin: 0; }
+.pager a[role="button"] {
+    padding: 0.22rem 0.8rem;
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-border-color);
+    border-radius: 0;
+    color: var(--pico-primary);
+    font-family: var(--pico-font-family);
+    font-size: 0.85rem;
+    text-decoration: none;
+}
+.pager a[role="button"]:hover:not([aria-disabled="true"]) {
+    background: #e6dfc9;
+    text-decoration: underline;
+}
+.pager a[role="button"][aria-disabled="true"] {
+    color: var(--pico-muted-color);
+    opacity: 0.65;
+    cursor: default;
+    text-decoration: none;
+}
 .pager .pager-dot { color: var(--pico-muted-color); }
 
 /* ---------- Details/summary ---------- */
