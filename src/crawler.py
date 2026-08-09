@@ -310,9 +310,9 @@ def _split_records(xml_text: str) -> list[str]:
 def parse_article_metadata(xml_text: str) -> dict:
     """Parse article metadata from a single OAI-PMH (oai_dc) XML record.
 
-    Extracts title (prefers en-US), DOI, authors, publication date,
-    journal shortname, OAI identifier, journal name, abstract, keywords,
-    and language.
+    Extracts title (prefers article language from dc:language with
+    tr<->en fallback), DOI, authors, publication date, journal shortname,
+    OAI identifier, journal name, abstract, keywords, and language.
 
     Args:
         xml_text: Raw OAI-PMH XML for a single record.
@@ -329,7 +329,7 @@ def parse_article_metadata(xml_text: str) -> dict:
     identifiers: list[str] = []
     relations: list[str] = []
     sources: list[str] = []
-    descriptions: list[str] = []
+    descriptions: list[tuple[str, str]] = []  # (text, lang)
     subjects: list[str] = []
     languages: list[str] = []
 
@@ -358,17 +358,32 @@ def parse_article_metadata(xml_text: str) -> dict:
         elif tag == "dc:source":
             sources.append(text)
         elif tag == "dc:description":
-            descriptions.append(text)
+            lang = (node.attributes.get("xml:lang") or "").lower()
+            descriptions.append((text, lang))
         elif tag == "dc:subject":
             subjects.append(text)
         elif tag == "dc:language":
             languages.append(text)
 
-    # Prefer English title; fall back to first available
-    title = ""
-    if titles:
-        en_titles = [t for t, lang in titles if lang.startswith("en")]
-        title = en_titles[0] if en_titles else titles[0][0]
+    # language: first dc:language value, normalized (tr-TR -> tr)
+    language = languages[0].strip().lower().split("-")[0] if languages else ""
+
+    # Select item matching article language, fallback to the other main
+    # dialect (tr<->en), then first available item.
+    def _select(items: list[tuple[str, str]]) -> str:
+        if not items:
+            return ""
+        if language:
+            pref = [t for t, lang in items if lang.startswith(language)]
+            if pref:
+                return pref[0]
+            other = "en" if language.startswith("tr") else "tr"
+            alt = [t for t, lang in items if lang.startswith(other)]
+            if alt:
+                return alt[0]
+        return items[0][0]
+
+    title = _select(titles)
 
     doi = ""
     for ident in identifiers:
@@ -399,16 +414,15 @@ def parse_article_metadata(xml_text: str) -> dict:
             journal_name = src
             break
 
-    # abstract: longest dc:description (multiple may exist)
-    abstract = ""
-    if descriptions:
-        abstract = max(descriptions, key=len).strip()
+    # abstract: description matching article language; unlabelled ones
+    # fall back to the longest description (legacy behavior)
+    tagged_desc = [(t, lang) for t, lang in descriptions if lang]
+    abstract = _select(tagged_desc) if tagged_desc else ""
+    if not abstract and descriptions:
+        abstract = max((t for t, _ in descriptions), key=len).strip()
 
     # keywords: all dc:subject values
     keywords = [s.strip() for s in subjects if s.strip()]
-
-    # language: first dc:language value
-    language = languages[0].strip() if languages else ""
 
     return {
         "title": title,

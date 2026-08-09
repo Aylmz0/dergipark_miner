@@ -190,7 +190,11 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
             params.append(json.dumps(new_val, ensure_ascii=False) if serialize else new_val)
 
     _add("abstract", cur_abstract, html_meta.get("abstract"))
-    _add("keywords", cur_keywords, html_meta.get("keywords"), serialize=True)
+    # Keywords: HTML meta wins over OAI dc:subject (OAI subjects are
+    # unlabelled tr/en mix + category names; HTML citation_keywords is clean).
+    if html_meta.get("keywords"):
+        updates.append("keywords = ?")
+        params.append(json.dumps(html_meta["keywords"], ensure_ascii=False))
     _add("language", cur_language, html_meta.get("language"))
     _add("journal_title", cur_journal_title, html_meta.get("journal_title"))
     _add("issn", cur_issn, html_meta.get("issn"))

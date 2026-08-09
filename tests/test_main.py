@@ -95,6 +95,41 @@ def test_update_article_metadata_does_not_overwrite_existing(conn):
     assert row[2] == "Existing Title"  # NOT overwritten
 
 
+def test_update_article_metadata_keywords_overwrites_existing(conn):
+    """HTML keywords overwrite OAI dc:subject keywords (HTML wins)."""
+    conn.execute(
+        "UPDATE articles SET keywords = ? WHERE oai_identifier = ?",
+        ('["Karışık OAI", "subject"]', "oai:dergipark.org.tr:article/12345"),
+    )
+    conn.commit()
+
+    html_meta = {"keywords": ["Temiz HTML", "kelime"]}
+    _update_article_metadata(conn, "oai:dergipark.org.tr:article/12345", html_meta)
+
+    row = conn.execute(
+        "SELECT keywords FROM articles WHERE oai_identifier = ?",
+        ("oai:dergipark.org.tr:article/12345",),
+    ).fetchone()
+    assert json.loads(row[0]) == ["Temiz HTML", "kelime"]
+
+
+def test_update_article_metadata_keywords_keeps_when_html_empty(conn):
+    """No HTML keywords: existing OAI keywords stay as-is."""
+    conn.execute(
+        "UPDATE articles SET keywords = ? WHERE oai_identifier = ?",
+        ('["OAI fallback"]', "oai:dergipark.org.tr:article/12345"),
+    )
+    conn.commit()
+
+    _update_article_metadata(conn, "oai:dergipark.org.tr:article/12345", {"keywords": []})
+
+    row = conn.execute(
+        "SELECT keywords FROM articles WHERE oai_identifier = ?",
+        ("oai:dergipark.org.tr:article/12345",),
+    ).fetchone()
+    assert json.loads(row[0]) == ["OAI fallback"]
+
+
 def test_update_article_metadata_empty_oai_id_returns(conn):
     """Empty oai_id returns without error."""
     _update_article_metadata(conn, "", {"abstract": "test"})

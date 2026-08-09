@@ -227,7 +227,7 @@ def test_parse_article_metadata_handles_missing_fields():
 
 
 def test_parse_article_metadata_prefers_en_title():
-    """When multiple dc:title exist, prefer en-US language."""
+    """When multiple dc:title exist and language is en, prefer en-US."""
     xml = """<?xml version="1.0"?>
     <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
       <ListRecords>
@@ -236,6 +236,7 @@ def test_parse_article_metadata_prefers_en_title():
             <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
               <dc:title xml:lang="tr-TR"><![CDATA[Turkce Baslik]]></dc:title>
               <dc:title xml:lang="en-US"><![CDATA[English Title]]></dc:title>
+              <dc:language>en</dc:language>
               <dc:relation>https://dergipark.org.tr/en/pub/ornak</dc:relation>
             </oai_dc:dc>
           </metadata>
@@ -246,6 +247,91 @@ def test_parse_article_metadata_prefers_en_title():
     meta = parse_article_metadata(xml)
     assert meta["title"] == "English Title"
     assert meta["journal_shortname"] == "ornak"
+
+
+def test_parse_article_metadata_prefers_tr_title():
+    """When multiple dc:title exist and language is tr, prefer tr-TR."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title xml:lang="en-US"><![CDATA[English Title]]></dc:title>
+              <dc:title xml:lang="tr-TR"><![CDATA[Turkce Baslik]]></dc:title>
+              <dc:language>tr</dc:language>
+              <dc:relation>https://dergipark.org.tr/en/pub/ornak</dc:relation>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["title"] == "Turkce Baslik"
+    assert meta["journal_shortname"] == "ornak"
+
+
+def test_parse_article_metadata_title_falls_back_to_other_lang():
+    """No title in article language: fall back to other main dialect (tr<->en)."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:title xml:lang="en-US"><![CDATA[English Only]]></dc:title>
+              <dc:language>tr</dc:language>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["title"] == "English Only"
+
+
+def test_parse_article_metadata_prefers_tr_abstract():
+    """dc:description matching article language is chosen over longest."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:description xml:lang="en-US"><![CDATA[This is a considerably longer English abstract text that keeps going.]]></dc:description>
+              <dc:description xml:lang="tr-TR"><![CDATA[Kisa Turkce ozet.]]></dc:description>
+              <dc:language>tr</dc:language>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["abstract"] == "Kisa Turkce ozet."
+
+
+def test_parse_article_metadata_abstract_falls_back_longest():
+    """No xml:lang on descriptions: use longest (legacy behavior)."""
+    xml = """<?xml version="1.0"?>
+    <OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+      <ListRecords>
+        <record>
+          <metadata>
+            <oai_dc:dc xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <dc:description><![CDATA[Short.]]></dc:description>
+              <dc:description><![CDATA[A much longer unlabelled abstract without language tags.]]></dc:description>
+              <dc:language>tr</dc:language>
+            </oai_dc:dc>
+          </metadata>
+        </record>
+      </ListRecords>
+    </OAI-PMH>
+    """
+    meta = parse_article_metadata(xml)
+    assert meta["abstract"] == "A much longer unlabelled abstract without language tags."
 
 
 def test_parse_article_metadata_falls_back_to_source():
