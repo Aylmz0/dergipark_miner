@@ -1,13 +1,15 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Arama — Dergipark Miner{% endblock %}
 {% block content %}
 <h2>Arama</h2>
 
 {% if not q %}
-<p class="muted">Dergi adı, makale başlığı, yazar, DOI veya anahtar kelime ara. Türkçe karakter duyarsızdır (İstanbul ↔ istanbul).</p>
+<p class="muted">Dergi adı, makale başlığı, özet, yazar, DOI, anahtar kelime, makale türü, yayıncı, ISSN, cilt/sayı/sayfa veya OAI kimliği ara. Türkçe karakter duyarsızdır (İstanbul ↔ istanbul).</p>
 {% else %}
 <h3>Dergiler <small class="muted">({{ journal_total }})</small></h3>
 {% if journal_rows %}
+<div class="table-wrap">
 <table>
     <thead><tr><th>Dergi</th><th>Kısa Ad</th><th>Makale</th><th>PDF</th></tr></thead>
     <tbody>
@@ -15,33 +17,44 @@
         <tr>
             <td><a href="/journals/{{ j.short_name }}">{{ j.name or j.short_name }}</a></td>
             <td class="mono">{{ j.short_name }}</td>
-            <td>{{ j.harvested }}</td>
-            <td>{{ j.pdfs }}</td>
+            <td class="num">{{ j.harvested }}</td>
+            <td class="num">{{ j.pdfs }}</td>
         </tr>
     {% endfor %}
     </tbody>
 </table>
-    <p><a href="/journals?q={{ q|urlencode }}">Tüm dergileri gör →</a></p>
+</div>
+    <p><a href="/journals?q={{ q|urlencode }}">Tüm dergileri gör {{ icons.ic("chev-r", 13) }}</a></p>
 {% elif journal_total == 0 %}
 <p class="muted">Dergi bulunamadı.</p>
 {% endif %}
 
-<h3>Makaleler <small class="muted">({{ article_total }})</small></h3>
+<h3>Makaleler <small class="muted">({{ article_total }} · {{ elapsed_ms }} ms)</small></h3>
 {% if article_rows %}
-<table>
-    <thead><tr><th>Yıl</th><th>Başlık</th><th>Dergi</th><th>PDF</th></tr></thead>
-    <tbody>
+<div class="result-list">
     {% for a in article_rows %}
-        <tr>
-            <td class="mono">{{ (a.publication_date or "")[:4] or "—" }}</td>
-            <td class="wrap"><a href="/articles/{{ a.id }}">{{ a.title or "—" }}</a></td>
-            <td><a href="/journals/{{ a.short_name }}">{{ a.journal_name or a.short_name }}</a></td>
-            <td>{% if a.pdf_url %}📄{% else %}—{% endif %}</td>
-        </tr>
+    <article class="result-card">
+        <div class="result-meta">
+            <span class="badge badge-year mono">{{ (a.publication_date or "")[:4] or "—" }}</span>
+            {% if a.article_type %}<span class="badge badge-type" title="{{ a.article_type }}">{{ a.article_type }}</span>{% endif %}
+        </div>
+        <h3 class="result-title"><a href="/articles/{{ a.id }}">{{ a.title or "Başlıksız Makale" }}</a></h3>
+        <div class="result-meta">
+            <span>{{ icons.ic("book", 13) }}<a href="/journals/{{ a.short_name }}">{{ a.journal_name or a.short_name }}</a></span>
+            {% if a.authors_csv %}<span>{{ icons.ic("user", 13) }}{{ a.authors_csv }}</span>{% endif %}
+        </div>
+        {% if a.snippet_html %}
+        <p class="result-snippet">{{ a.snippet_html|safe }}{% if a.match_labels %}<span class="match-chip">{{ icons.ic("tag", 12) }} {{ a.match_labels|join(" · ") }}</span>{% endif %}</p>
+        {% endif %}
+        <div class="result-meta">
+            {% if a.is_oa %}<span class="badge badge-oa">{{ icons.ic("check", 13) }} Açık Erişim</span>{% endif %}
+            {% if a.pdf_url %}<span>{{ icons.ic("pdf", 13) }}<a href="/articles/{{ a.id }}" class="badge">PDF</a></span>{% endif %}
+            {% if a.doi %}<span class="badge mono" title="{{ a.doi }}">{{ a.doi }}</span>{% endif %}
+        </div>
+    </article>
     {% endfor %}
-    </tbody>
-</table>
-    <p><a href="/articles?q={{ q|urlencode }}">Tüm makaleleri gör →</a></p>
+</div>
+    <p><a href="/articles?q={{ q|urlencode }}">Tüm makaleleri gör {{ icons.ic("chev-r", 13) }}</a></p>
 {% elif article_total == 0 %}
 <p class="muted">Makale bulunamadı.</p>
 {% endif %}
@@ -50,7 +63,7 @@
 {% if author_rows %}
 <ul>
     {% for au in author_rows %}
-    <li><a href="/articles?q={{ au.name|urlencode }}">{{ au.name }}</a> <span class="muted">({{ au.article_count }} makale)</span></li>
+    <li>{{ icons.ic("user", 13) }} <a href="/articles?q={{ au.name|urlencode }}">{{ au.name }}</a> <span class="muted">({{ au.article_count }} makale)</span></li>
     {% endfor %}
 </ul>
 {% elif author_total == 0 %}

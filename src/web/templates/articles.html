@@ -2,30 +2,44 @@
 {% block title %}Makaleler — Dergipark Miner{% endblock %}
 {% block content %}
 <h2>Makaleler</h2>
-<form hx-get="/articles" hx-target="#article-rows" method="get">
-    <div class="grid">
-        <input type="search" name="q" value="{{ q }}" placeholder="Başlık / DOI / anahtar kelime / yazar ara..." hx-get="/articles" hx-target="#article-rows" hx-include="closest form" hx-trigger="input changed delay:400ms, search">
-        <select name="language" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
-            <option value="">Tüm Diller</option>
-            {% for lang in lang_opts %}
-            <option value="{{ lang }}" {% if language == lang %}selected{% endif %}>{{ lang }}</option>
-            {% endfor %}
-        </select>
-        <select name="year" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
-            <option value="">Tüm Yıllar</option>
-            {% for y in year_opts %}
-            <option value="{{ y }}" {% if year == y %}selected{% endif %}>{{ y }}</option>
-            {% endfor %}
-        </select>
-    </div>
-    <div>
-        <label><input type="checkbox" name="oa" value="1" {% if oa %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece açık erişim</label>
-        <label><input type="checkbox" name="pdf" value="1" {% if pdf %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece PDF'li</label>
-    </div>
-</form>
-<p class="muted">{{ pg.total }} makale bulundu · Sayfa {{ pg.page }}/{{ pg.pages }}</p>
+<div class="filter-bar">
+    <form method="get" hx-get="/articles" hx-target="#article-rows">
+        <div class="filter-row">
+            <input type="search" name="q" value="{{ q }}" placeholder="Başlık, özet, anahtar kelime, DOI, tür, ISSN, yazar ara..." hx-get="/articles" hx-target="#article-rows" hx-include="closest form" hx-trigger="input changed delay:400ms, search">
+            <select name="sort" aria-label="Sıralama" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+                <option value="date_desc" {% if sort == "date_desc" %}selected{% endif %}>En yeni</option>
+                <option value="date_asc" {% if sort == "date_asc" %}selected{% endif %}>En eski</option>
+                <option value="title" {% if sort == "title" %}selected{% endif %}>Başlık (A-Z)</option>
+                <option value="journal" {% if sort == "journal" %}selected{% endif %}>Dergi adı</option>
+            </select>
+            <select name="language" aria-label="Dil" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+                <option value="">Tüm Diller</option>
+                {% for lang in lang_opts %}
+                <option value="{{ lang }}" {% if language == lang %}selected{% endif %}>{{ lang }}</option>
+                {% endfor %}
+            </select>
+            <select name="type" aria-label="Tür" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+                <option value="">Tüm Türler</option>
+                {% for t in type_opts %}
+                <option value="{{ t }}" {% if type == t %}selected{% endif %}>{{ t }}</option>
+                {% endfor %}
+            </select>
+            <select name="year" aria-label="Yıl" hx-get="/articles" hx-target="#article-rows" hx-include="closest form">
+                <option value="">Tüm Yıllar</option>
+                {% for y in year_opts %}
+                <option value="{{ y }}" {% if year == y %}selected{% endif %}>{{ y }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="filter-opts">
+            <label><input type="checkbox" name="oa" value="1" {% if oa %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece açık erişim</label>
+            <label><input type="checkbox" name="pdf" value="1" {% if pdf %}checked{% endif %} hx-get="/articles" hx-target="#article-rows" hx-include="closest form"> Sadece PDF'li</label>
+        </div>
+    </form>
+</div>
+<p class="muted">{{ pg.total }} makale bulundu · Sayfa {{ pg.page }}/{{ pg.pages }} · {{ elapsed_ms }} ms</p>
 <div id="article-rows">
-    {% set base_url = "/articles?q=" ~ (q or "")|urlencode ~ "&language=" ~ (language or "")|urlencode ~ "&oa=" ~ (oa or "")|urlencode ~ "&year=" ~ (year or "")|urlencode ~ "&pdf=" ~ (pdf or "")|urlencode %}
+    {% set base_url = "/articles?" ~ "q=" ~ (q or "")|urlencode ~ "&language=" ~ (language or "")|urlencode ~ "&oa=" ~ (oa or "")|urlencode ~ "&year=" ~ (year or "")|urlencode ~ "&pdf=" ~ (pdf or "")|urlencode ~ "&type=" ~ (type or "")|urlencode ~ "&sort=" ~ (sort or "")|urlencode %}
     {% set target = "#article-rows" %}
     {% include "partials/article_rows.html" %}
 </div>

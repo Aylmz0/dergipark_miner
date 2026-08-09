@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}Export — Dergipark Miner{% endblock %}
 {% block content %}
 <h2>Veri Export</h2>
@@ -6,9 +7,10 @@
 {% if export_.exists %}
 <article>
     <header><h3>all_articles.jsonl</h3></header>
-    <p><strong>Boyut:</strong> {{ export_.size_mb }} MB · <strong>Son güncelleme:</strong> <span class="mono">{{ export_.modified }}</span></p>
+    <div class="kv-line"><strong>Boyut</strong> <span>{{ export_.size_mb }} MB</span></div>
+    <div class="kv-line"><strong>Son güncelleme</strong> <span class="mono">{{ export_.modified }}</span></div>
     <p>Her satır bir makale; 22 alan (title, authors, abstract, keywords, DOI, is_oa, pdf_url, references vb.).</p>
-    <a role="button" href="/api/export.jsonl">⬇️ İndir ({{ export_.size_mb }} MB)</a>
+    <a role="button" href="/api/export.jsonl">{{ icons.ic("download", 15) }} İndir ({{ export_.size_mb }} MB)</a>
 </article>
 {% else %}
 <p class="muted">Export dosyası henüz oluşturulmamış. İlk hasat sonrası <span class="mono">data/exports/all_articles.jsonl</span> altında oluşur.</p>
@@ -16,6 +18,7 @@
 
 <section>
     <h3>İlgili Dosyalar</h3>
+    <div class="table-wrap">
     <table>
         <tbody>
             <tr><td>SQLite veritabanı</td><td class="mono">data/Sobiad_Mining.sqlite</td></tr>
@@ -24,5 +27,6 @@
             <tr><td>PDF arşivi</td><td class="mono">data/raw_pdfs/</td></tr>
         </tbody>
     </table>
+    </div>
 </section>
 {% endblock %}

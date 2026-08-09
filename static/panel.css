@@ -1,0 +1,261 @@
+/* Dergipark Miner — design system over Pico v2: 90's academic/paper web */
+
+:root {
+    /* 90s Academic/Paper Web Palette */
+    --pico-background-color: #fdfbf7;      /* Fildişi / Kitap kağıdı beji */
+    --pico-color: #1f2937;                 /* Koyu mürekkep metin */
+    --pico-primary: #1a56db;               /* Klasik hiperlink mavisi */
+    --pico-primary-background: #1a56db;
+    --pico-muted-color: #4b5563;           /* İkincil / Yardımcı metin */
+    --pico-border-color: #d1d5db;          /* Net ayrım çizgileri */
+
+    /* Tipografi */
+    --pico-font-family: system-ui, -apple-system, "Segoe UI", Roboto, Georgia, serif;
+    --pico-font-size: 15px;
+
+    /* Bileşen köprüleri (aynı paletin türevleri) */
+    --pico-card-background-color: #ffffff;
+    --pico-muted-border-color: #d1d5db;
+    --pico-primary-border: #1a56db;
+    --pico-primary-hover: #1549c0;
+    --pico-primary-focus: rgba(26, 86, 219, 0.18);
+    --pico-form-element-background-color: #ffffff;
+    --pico-form-element-border-color: #d1d5db;
+
+    --panel-radius: 0.5rem;
+    --panel-gap: 0.75rem;
+    --panel-max-width: 920px;
+    --pico-container-max-width: 920px;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        /* Dark Mode (Amber Terminal Dokunuşu) */
+        --pico-background-color: #12131c;
+        --pico-color: #e2e8f0;
+        --pico-primary: #f59e0b;            /* Amber vurgu */
+        --pico-primary-background: #f59e0b;
+        --pico-muted-color: #94a3b8;
+        --pico-border-color: #1e293b;
+
+        --pico-card-background-color: #171926;
+        --pico-muted-border-color: #2a3040;
+        --pico-primary-border: #f59e0b;
+        --pico-primary-hover: #fbbf24;
+        --pico-primary-focus: rgba(245, 158, 11, 0.2);
+        --pico-form-element-background-color: #171926;
+        --pico-form-element-border-color: #2a3040;
+    }
+}
+
+html { font-size: 0.9375rem; }
+h1 { font-size: 1.25rem; }
+h2 { font-size: 1.1rem; }
+h3 { font-size: 0.98rem; }
+h4 { font-size: 0.9rem; }
+h1, h2, h3 { margin-bottom: 0.6rem; }
+
+main, nav { max-width: var(--panel-max-width); margin-inline: auto; }
+main { padding: 0 var(--pico-spacing, 1rem) 1.5rem; }
+
+.mono {
+    font-family: var(--pico-font-family-monospace, ui-monospace, "Cascadia Mono", "Segoe Mono", monospace);
+    font-size: 0.88em;
+    letter-spacing: 0.01em;
+}
+
+.svg-icon {
+    display: inline-block;
+    vertical-align: -0.18em;
+    flex-shrink: 0;
+}
+
+/* ---------- Navbar: no overflow, brand | search | links ---------- */
+nav {
+    flex-wrap: wrap;
+    row-gap: 0.4rem;
+    padding-top: 0.55rem;
+}
+nav ul { flex-wrap: wrap; align-items: center; margin: 0; }
+nav ul:last-child { margin-left: auto; }
+nav a:not(.brand-link), nav form input { font-size: 0.88rem; }
+nav a[aria-current="page"] { color: var(--pico-primary); font-weight: 600; }
+
+.brand-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-weight: 800;
+    font-size: 0.98rem;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+}
+
+/* Search pill: one icon only, native chrome decoration removed */
+.nav-search { position: relative; margin: 0; }
+.nav-search .nav-search-icon {
+    position: absolute;
+    left: 0.7rem;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--pico-muted-color);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+}
+.nav-search input[type="search"] {
+    width: clamp(180px, 24vw, 340px);
+    margin: 0;
+    padding: 0.32rem 0.9rem 0.32rem 2.1rem;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    background: var(--pico-form-element-background-color);
+    border-color: var(--pico-form-element-border-color);
+}
+.nav-search input[type="search"]:focus {
+    border-color: var(--pico-primary);
+    box-shadow: 0 0 0 2px var(--pico-primary-focus);
+}
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+    appearance: none;
+    display: none;
+}
+
+/* ---------- Stat cards: equal height, symmetric ---------- */
+.stat-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--panel-gap);
+    margin-bottom: 1rem;
+}
+.stat-card {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.15rem;
+    min-height: 4.25rem;
+    padding: 0.7rem 0.9rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--panel-radius);
+    background: var(--pico-card-background-color);
+}
+.stat-card .value { font-size: 1.3rem; font-weight: 700; line-height: 1.15; }
+.stat-card .label {
+    font-size: 0.72rem;
+    color: var(--pico-muted-color);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+/* ---------- Filter bar (articles) ---------- */
+.filter-bar { margin-bottom: 0.9rem; }
+.filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+}
+.filter-row input[type="search"] { flex: 1 1 240px; margin: 0; }
+.filter-row select { width: auto; margin: 0; padding: 0.35rem 2rem 0.35rem 0.7rem; font-size: 0.85rem; }
+.filter-opts { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 1.2rem; }
+.filter-opts label { display: inline-flex; align-items: center; gap: 0.3rem; margin: 0; font-size: 0.85rem; }
+
+/* ---------- Result list (article cards) ---------- */
+.result-list { display: flex; flex-direction: column; gap: var(--panel-gap); margin: 0.75rem 0; }
+.result-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.75rem 0.95rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: var(--panel-radius);
+    background: var(--pico-card-background-color);
+}
+.result-title {
+    font-size: 0.98rem;
+    font-weight: 600;
+    line-height: 1.35;
+    text-decoration: none;
+}
+.result-title:hover { text-decoration: underline; }
+.result-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem 0.9rem;
+    font-size: 0.82rem;
+    color: var(--pico-muted-color);
+}
+.result-meta a { color: inherit; text-decoration: none; }
+.result-meta a:hover { color: var(--pico-primary); }
+.result-snippet {
+    margin: 0.1rem 0 0;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: var(--pico-muted-color);
+}
+.result-snippet .match-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-inline-start: 0.4rem;
+}
+
+.kw-chips { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; }
+.kw-chips .badge { text-transform: none; letter-spacing: normal; }
+
+/* ---------- Badges ---------- */
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    max-width: 100%;
+    padding: 0.06rem 0.55rem;
+    border: 1px solid var(--pico-muted-border-color);
+    border-radius: 999px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--pico-muted-color);
+}
+.badge-type { max-width: 180px; }
+.badge-oa { color: var(--pico-primary); border-color: var(--pico-primary-border, currentColor); }
+
+/* ---------- Tables ---------- */
+.table-wrap { overflow-x: auto; margin: 0.4rem 0 0.9rem; }
+.table-wrap table { margin-bottom: 0; min-width: 520px; }
+.table-wrap th, .table-wrap td { text-align: left; vertical-align: middle; }
+.table-wrap .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap thead th { white-space: nowrap; }
+
+/* ---------- Pagination ---------- */
+.pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem 0.9rem;
+    flex-wrap: wrap;
+    margin: 0.9rem 0 0;
+}
+.pager a[role="button"], .pager span { margin: 0; }
+.pager .pager-dot { color: var(--pico-muted-color); }
+
+/* ---------- Details/summary ---------- */
+details { margin-bottom: 0.9rem; }
+
+/* ---------- Export/article detail ---------- */
+.kv-line { display: flex; gap: 0.5rem; margin: 0.15rem 0; font-size: 0.9rem; }
+.kv-line > strong { flex: 0 0 7.5rem; color: var(--pico-muted-color); font-weight: 600; }
+
+/* ---------- Media: collapse detail grids ---------- */
+@media (max-width: 720px) {
+    .grid-2 { grid-template-columns: 1fr !important; }
+    nav ul:last-child { margin-left: 0; }
+}

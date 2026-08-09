@@ -42,6 +42,29 @@ def client(tmp_path, monkeypatch):
     conn.execute(
         "UPDATE articles SET is_oa = 1, pdf_url = 'https://dergipark.org.tr/pdf/x' WHERE id % 2 = 1"
     )
+    # Harvested metadata fields (enricher writes these separately)
+    conn.execute(
+        "UPDATE articles SET article_type='Araştırma Makalesi', publisher='Ankara Üniversitesi',"
+        " issn='0901-0000', volume='1', issue='1', pages='1-12' WHERE title='Makale 0'"
+    )
+    conn.execute("UPDATE articles SET article_type='Derleme' WHERE title='Makale 1'")
+    conn.execute("UPDATE articles SET article_type='Kısa Bildiri' WHERE title='Makale 2'")
+    conn.execute(
+        "UPDATE articles SET abstract='Ankara deprem veri analizi' WHERE title='Makale 1'"
+    )
+    insert_article(
+        conn,
+        {
+            "title": "Ankara University Semineri",
+            "journal_shortname": "abantmedj",
+            "journal_name": "Abant Medical Journal",
+            "publication_date": "2019",
+            "oai_identifier": "oai:dergipark.org.tr:article/104",
+            "authors": [],
+            "abstract": "Sismik araştırma raporu içerir",
+            "language": "tur",
+        },
+    )
     conn.commit()
     conn.close()
 
@@ -55,17 +78,12 @@ def client(tmp_path, monkeypatch):
         "resume_tokens": {},
     }
     (tmp_path / "checkpoint.json").write_text(json.dumps(ckpt), encoding="utf-8")
-    (tmp_path / "pdf_errors.json").write_text(
-        json.dumps([{"oai_id": "oai:1", "error": "timeout", "retry_count": 2}]), encoding="utf-8"
-    )
     export_dir = tmp_path / "exports"
     export_dir.mkdir()
     export_path = export_dir / "all_articles.jsonl"
     export_path.write_text('{"title": "x"}\n', encoding="utf-8")
 
     monkeypatch.setattr(web_app, "DB_PATH", db)
-    monkeypatch.setattr(web_app, "CHECKPOINT_PATH", tmp_path / "checkpoint.json")
-    monkeypatch.setattr(web_app, "PDF_ERRORS_PATH", tmp_path / "pdf_errors.json")
     monkeypatch.setattr(web_app, "EXPORT_PATH", export_path)
 
     with TestClient(web_app.app) as c:
@@ -153,6 +171,76 @@ def test_articles_search_wildcard_literal(client):
     assert "Sonuç bulunamadı" in resp.text
 
 
+def test_articles_search_type(client):
+    resp = client.get("/articles?q=Derleme")
+    assert resp.status_code == 200
+    assert "Makale 1" in resp.text
+    assert "Makale 0" not in resp.text
+
+
+def test_articles_search_publisher(client):
+    resp = client.get("/articles?q=%C3%9Cniversitesi")
+    assert resp.status_code == 200
+    assert "Makale 0" in resp.text
+    assert "Makale 1" not in resp.text
+
+
+def test_articles_search_issn(client):
+    resp = client.get("/articles?q=0901-0000")
+    assert resp.status_code == 200
+    assert "Makale 0" in resp.text
+    assert "Makale 1" not in resp.text
+
+
+def test_articles_search_multiterm_and(client):
+    resp = client.get("/articles?q=Ankara%20%C3%9Cniversitesi")
+    assert resp.status_code == 200
+    assert "Makale 0" in resp.text
+    assert "Makale 1" not in resp.text
+
+
+def test_articles_relevance_rank_title_over_abstract(client):
+    resp = client.get("/articles?q=Ankara")
+    body = resp.text
+    title_pos = body.index("Ankara University Semineri")
+    abstract_only_pos = body.index("Ankara deprem") if "Ankara deprem" in body else len(body)
+    assert title_pos < abstract_only_pos
+
+
+def test_articles_snippet_marks_when_q(client):
+    resp = client.get("/articles?q=Ankara")
+    assert "<mark>" in resp.text
+
+
+def test_articles_no_mark_without_q(client):
+    resp = client.get("/articles")
+    assert "<mark>" not in resp.text
+
+
+def test_articles_match_chips(client):
+    resp = client.get("/articles?q=Makale")
+    assert "eşleşti" in resp.text or "Başlık" in resp.text
+
+
+def test_articles_elapsed_ms(client):
+    resp = client.get("/articles?q=Ankara")
+    assert "ms" in resp.text
+
+
+def test_article_detail_similar(client):
+    resp = client.get("/articles/2")
+    assert resp.status_code == 200
+    assert "Benzer Makaleler" in resp.text
+    assert "Makale 0" in resp.text
+
+
+def test_articles_type_filter(client):
+    resp = client.get("/articles?type=Derleme")
+    assert resp.status_code == 200
+    assert "Makale 1" in resp.text
+    assert "Makale 0" not in resp.text
+
+
 def test_global_search_all(client):
     resp = client.get("/search?q=Yazar")
     assert resp.status_code == 200
@@ -195,7 +283,7 @@ def test_article_detail(client):
     resp = client.get("/articles/2")
     assert resp.status_code == 200
     assert "Yazar A" in resp.text
-    assert "Özet 1" in resp.text
+    assert "Ankara deprem" in resp.text
 
 
 def test_article_detail_404(client):
@@ -203,11 +291,9 @@ def test_article_detail_404(client):
     assert resp.status_code == 404
 
 
-def test_failures_page(client):
+def test_failures_gone(client):
     resp = client.get("/failures")
-    assert resp.status_code == 200
-    assert "audit: 1 missing" in resp.text
-    assert "timeout" in resp.text
+    assert resp.status_code == 404
 
 
 def test_exports_page(client):

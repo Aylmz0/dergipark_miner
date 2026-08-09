@@ -1,29 +1,30 @@
+{% import "_icons.html" as icons %}
 {% if rows %}
+<div class="table-wrap">
 <table>
     <thead>
-        <tr><th>Dergi</th><th>Kısa Ad</th><th>Makale</th><th>PDF</th><th>Son Yayın</th></tr>
+        <tr><th>Dergi</th><th>Kısa Ad</th><th class="num">Makale</th><th class="num">PDF</th><th>Son Yayın</th></tr>
     </thead>
     <tbody>
     {% for j in rows %}
         <tr>
-            <td><a href="/journals/{{ j.short_name }}">{{ j.name or j.short_name }}</a></td>
+            <td>{{ icons.ic("book", 13) }} <a href="/journals/{{ j.short_name }}">{{ j.name or j.short_name }}</a></td>
             <td class="mono">{{ j.short_name }}</td>
-            <td>{{ j.harvested }}</td>
-            <td>{{ j.pdfs }}</td>
+            <td class="num">{{ j.harvested }}</td>
+            <td class="num">{{ j.pdfs }}</td>
             <td class="mono">{{ j.latest_date or "—" }}</td>
         </tr>
     {% endfor %}
     </tbody>
 </table>
+</div>
 {% else %}
 <p class="muted">Sonuç bulunamadı.</p>
 {% endif %}
 {% if pg.pages > 1 %}
-<nav aria-label="Sayfa">
-    <ul>
-        <li><a role="button" class="secondary" {% if pg.page > 1 %}hx-get="/journals?q={{ q|urlencode }}&page={{ pg.page - 1 }}" hx-target="#journal-rows"{% else %}aria-disabled="true"{% endif %}>← Önceki</a></li>
-        <li><small class="muted">{{ pg.page }} / {{ pg.pages }}</small></li>
-        <li><a role="button" class="secondary" {% if pg.page < pg.pages %}hx-get="/journals?q={{ q|urlencode }}&page={{ pg.page + 1 }}" hx-target="#journal-rows"{% else %}aria-disabled="true"{% endif %}>Sonraki →</a></li>
-    </ul>
+<nav aria-label="Sayfa" class="pager">
+    <a role="button" class="secondary" {% if pg.page > 1 %}href="/journals?q={{ q|urlencode }}&page={{ pg.page - 1 }}" hx-get="/journals?q={{ q|urlencode }}&page={{ pg.page - 1 }}" hx-target="#journal-rows"{% else %}aria-disabled="true"{% endif %}>{{ icons.ic("chev-l", 14) }} Önceki</a>
+    <span class="pager-dot">{{ pg.page }} / {{ pg.pages }}</span>
+    <a role="button" class="secondary" {% if pg.page < pg.pages %}href="/journals?q={{ q|urlencode }}&page={{ pg.page + 1 }}" hx-get="/journals?q={{ q|urlencode }}&page={{ pg.page + 1 }}" hx-target="#journal-rows"{% else %}aria-disabled="true"{% endif %}>Sonraki {{ icons.ic("chev-r", 14) }}</a>
 </nav>
 {% endif %}

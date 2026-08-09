@@ -1,39 +1,34 @@
 <!DOCTYPE html>
-<html lang="tr" data-theme="dark">
+<html lang="tr">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Dergipark Miner{% endblock %}</title>
     <link rel="stylesheet" href="/assets/vendor/pico.min.css">
+    <link rel="stylesheet" href="/assets/panel.css">
     <script src="/assets/vendor/htmx.min.js" defer></script>
     <script src="/assets/vendor/alpine.min.js" defer></script>
-    <style>
-        nav ul li a { text-decoration: none; }
-        .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.8rem; margin: 1rem 0; }
-        .stat-card { border: 1px solid var(--pico-muted-border-color); border-radius: 0.5rem; padding: 0.8rem 1rem; }
-        .stat-card .value { font-size: 1.6rem; font-weight: 700; }
-        .stat-card .label { font-size: 0.8rem; color: var(--pico-muted-color); text-transform: uppercase; letter-spacing: 0.05em; }
-        .mono { font-family: var(--pico-font-family-monospace); font-size: 0.85em; }
-        .muted { color: var(--pico-muted-color); }
-        .wrap { word-break: break-word; }
-        details { margin-bottom: 1rem; }
-    </style>
 </head>
 <body>
+    {% import "_icons.html" as icons %}
     <nav>
         <ul>
-            <li><strong>📚 Dergipark Miner</strong></li>
+            <li>
+                <a class="brand-link" href="/">{{ icons.ic("book", 17) }}Dergipark Miner</a>
+            </li>
         </ul>
         <ul>
             <li>
-                <form action="/search" method="get" style="margin: 0;">
-                    <input type="search" name="q" placeholder="Dergi, makale, yazar ara..." size="25" aria-label="Ara" value="{{ request.query_params.get('q', '') }}">
+                <form action="/search" method="get" class="nav-search">
+                    <span class="nav-search-icon">{{ icons.ic("search", 13) }}</span>
+                    <input type="search" name="q" placeholder="Dergi, makale, yazar, DOI ara..." aria-label="Ara" value="{{ request.query_params.get('q', '') }}">
                 </form>
             </li>
+        </ul>
+        <ul>
             <li><a href="/" {% if request.url.path == '/' %}aria-current="page"{% endif %}>Panel</a></li>
             <li><a href="/journals" {% if request.url.path.startswith('/journals') %}aria-current="page"{% endif %}>Dergiler</a></li>
             <li><a href="/articles" {% if request.url.path.startswith('/articles') %}aria-current="page"{% endif %}>Makaleler</a></li>
-            <li><a href="/failures" {% if request.url.path == '/failures' %}aria-current="page"{% endif %}>Hatalar</a></li>
             <li><a href="/exports" {% if request.url.path == '/exports' %}aria-current="page"{% endif %}>Export</a></li>
         </ul>
     </nav>

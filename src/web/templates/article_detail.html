@@ -1,34 +1,38 @@
 {% extends "base.html" %}
+{% import "_icons.html" as icons %}
 {% block title %}{{ article.title or "Makale" }} — Dergipark Miner{% endblock %}
 {% block content %}
 <p><a href="/articles">← Makaleler</a></p>
 <article>
     <header><h2>{{ article.title or "Başlıksız Makale" }}</h2></header>
-    <p><strong>Dergi:</strong> <a href="/journals/{{ article.short_name }}">{{ article.journal_name }}</a></p>
+    <div class="kv-line"><strong>Dergi</strong> <a href="/journals/{{ article.short_name }}">{{ article.journal_name }}</a></div>
     {% if article.authors %}
-    <p><strong>Yazarlar:</strong> {{ article.authors | join(", ") }}</p>
+    <div class="kv-line"><strong>Yazarlar</strong> <span>{% for au in article.authors %}{% if not loop.first %} · {% endif %}<a href="/articles?q={{ au|urlencode }}">{{ au }}</a>{% endfor %}</span></div>
     {% endif %}
-    <p><strong>Yayın tarihi:</strong> <span class="mono">{{ article.publication_date or "—" }}</span></p>
+    <div class="kv-line"><strong>Yayın tarihi</strong> <span class="mono">{{ article.publication_date or "—" }}</span></div>
+    {% if article.article_type %}
+    <div class="kv-line"><strong>Tür</strong> <span class="badge badge-type">{{ article.article_type }}</span></div>
+    {% endif %}
 
-    <div class="grid">
+    <div class="grid grid-2">
         <div>
-            <p><strong>DOI:</strong> <span class="mono">{{ article.doi or "—" }}</span></p>
-            <p><strong>OAI:</strong> <span class="mono wrap">{{ article.oai_identifier or "—" }}</span></p>
-            <p><strong>Dil:</strong> {{ article.language or "—" }}</p>
-            <p><strong>Tür:</strong> {{ article.article_type or "—" }}</p>
+            <div class="kv-line"><strong>DOI</strong> <span class="mono">{{ article.doi or "—" }}</span></div>
+            <div class="kv-line"><strong>OAI</strong> <span class="mono wrap">{{ article.oai_identifier or "—" }}</span></div>
+            <div class="kv-line"><strong>Dil</strong> <span>{{ article.language or "—" }}</span></div>
+            <div class="kv-line"><strong>ISSN</strong> <span class="mono">{{ article.issn or "—" }}</span></div>
         </div>
         <div>
-            <p><strong>Cilt:</strong> {{ article.volume or "—" }} <strong>Sayı:</strong> {{ article.issue or "—" }}</p>
-            <p><strong>Sayfalar:</strong> <span class="mono">{{ article.pages or "—" }}</span></p>
-            <p><strong>ISSN:</strong> <span class="mono">{{ article.issn or "—" }}</span></p>
-            <p><strong>Yayıncı:</strong> {{ article.publisher or "—" }}</p>
+            <div class="kv-line"><strong>Cilt</strong> <span>{{ article.volume or "—" }} / Sayı: {{ article.issue or "—" }}</span></div>
+            <div class="kv-line"><strong>Sayfalar</strong> <span class="mono">{{ article.pages or "—" }}</span></div>
+            <div class="kv-line"><strong>Yayıncı</strong> <span>{{ article.publisher or "—" }}</span></div>
         </div>
     </div>
 
     <p>
-        {% if article.is_oa %}<span class="muted">✅ Açık erişim</span>{% else %}<span class="muted">🔒 Açık erişim değil</span>{% endif %}
-        {% if article.pdf_url %} · <a href="{{ article.pdf_url }}" target="_blank" rel="noopener">📄 PDF</a>{% endif %}
-        {% if article.article_url %}<a href="{{ article.article_url }}" target="_blank" rel="noopener">🔗 Makale sayfası</a>{% endif %}
+        {% if article.is_oa %}<span class="badge badge-oa">{{ icons.ic("check", 13) }} Açık erişim</span>
+        {% else %}<span class="badge badge-oa-pad">{{ icons.ic("lock", 12) }} Açık erişim değil</span>{% endif %}
+        {% if article.pdf_url %} · <a href="{{ article.pdf_url }}" target="_blank" rel="noopener">{{ icons.ic("pdf", 14) }} PDF</a>{% endif %}
+        {% if article.article_url %}<a href="{{ article.article_url }}" target="_blank" rel="noopener">{{ icons.ic("external", 14) }} Makale sayfası</a>{% endif %}
     </p>
 
     {% if article.abstract %}
@@ -40,17 +44,42 @@
 
     <details>
         <summary>Teknik Ayrıntılar</summary>
-        <div class="grid">
+        <div class="grid grid-2">
             <div>
-                <p><strong>content_hash:</strong> <span class="mono wrap">{{ article.content_hash or "—" }}</span></p>
-                <p><strong>enriched_at:</strong> <span class="mono">{{ article.enriched_at or "—" }}</span></p>
-                <p><strong>Kayıt:</strong> <span class="mono">{{ article.created_at or "—" }}</span></p>
+                <div class="kv-line"><strong>content_hash</strong> <span class="mono wrap">{{ article.content_hash or "—" }}</span></div>
+                <div class="kv-line"><strong>enriched_at</strong> <span class="mono">{{ article.enriched_at or "—" }}</span></div>
+                <div class="kv-line"><strong>Kayıt</strong> <span class="mono">{{ article.created_at or "—" }}</span></div>
             </div>
             <div>
-                <p><strong>keywords:</strong> <span class="mono wrap">{{ article.keywords or "—" }}</span></p>
-                {% if article.orcid %}<p><strong>ORCID:</strong> <span class="mono wrap">{{ article.orcid }}</span></p>{% endif %}
+                {% if article._keyword_list %}
+                <div class="kv-line"><strong>Keywords</strong> <span class="kw-chips">{% for kw in article._keyword_list %}<a class="badge" href="/articles?q={{ kw|urlencode }}">{{ kw }}</a>{% endfor %}</span></div>
+                {% endif %}
+                {% if article.orcid %}<div class="kv-line"><strong>ORCID</strong> <span class="mono wrap">{{ article.orcid }}</span></div>{% endif %}
             </div>
         </div>
     </details>
 </article>
+
+{% if similar %}
+<section>
+    <h3>Benzer Makaleler</h3>
+    <div class="result-list">
+    {% for s in similar %}
+        <article class="result-card">
+            <div class="result-meta">
+                <span class="badge badge-year mono">{{ (s.publication_date or "")[:4] or "—" }}</span>
+                {% if s.article_type %}<span class="badge badge-type">{{ s.article_type }}</span>{% endif %}
+            </div>
+            <h3 class="result-title"><a href="/articles/{{ s.id }}">{{ s.title or "Başlıksız Makale" }}</a></h3>
+            <div class="result-meta">
+                <span>{{ icons.ic("book", 13) }}<a href="/journals/{{ s.short_name }}">{{ s.journal_name or s.short_name }}</a></span>
+            </div>
+            {% if s.snippet_html %}
+            <p class="result-snippet">{{ s.snippet_html|safe }}</p>
+            {% endif %}
+        </article>
+    {% endfor %}
+    </div>
+</section>
+{% endif %}
 {% endblock %}
