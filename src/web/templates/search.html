@@ -48,7 +48,7 @@
         {% endif %}
         <div class="result-meta">
             {% if a.is_oa %}<span class="badge badge-oa">{{ icons.ic("check", 13) }} Açık Erişim</span>{% endif %}
-            {% if a.pdf_url %}<span>{{ icons.ic("pdf", 13) }}<a href="/articles/{{ a.id }}" class="badge">PDF</a></span>{% endif %}
+            {% if a.pdf_url %}<span>{{ icons.ic("pdf", 13) }}<a href="{{ a.pdf_url }}" target="_blank" rel="noopener" class="badge">PDF</a></span>{% endif %}
             {% if a.doi %}<span class="badge mono" title="{{ a.doi }}">{{ a.doi }}</span>{% endif %}
         </div>
     </article>

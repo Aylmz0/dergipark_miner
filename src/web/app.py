@@ -23,6 +23,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from src.utils import PDF_BASE_URL, pdf_filename
 from src.web import queries
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,6 +31,7 @@ DB_PATH = ROOT / "data" / "Sobiad_Mining.sqlite"
 EXPORT_PATH = ROOT / "data" / "exports" / "all_articles.jsonl"
 STATIC_DIR = ROOT / "static"
 TEMPLATE_DIR = ROOT / "src" / "web" / "templates"
+PDF_DIR = ROOT / "data" / "raw_pdfs"
 
 PAGE_SIZE = 50
 
@@ -96,6 +98,41 @@ def pagination(total: int, page: int) -> dict:
     pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = max(1, min(page, pages))
     return {"page": page, "pages": pages, "offset": (page - 1) * PAGE_SIZE, "total": total}
+
+
+def _local_pdf_url(row: dict) -> str | None:
+    """Local serve path for a harvested PDF, or None when the file is missing.
+
+    PDFs are already downloaded to data/raw_pdfs during the crawl; serve
+    them ourselves instead of redirecting to DergiPark.
+    """
+    article_id = row.get("id")
+    oai = row.get("oai_identifier") or ""
+    if not article_id or not oai:
+        return None
+    path = PDF_DIR / pdf_filename(oai)
+    if not path.is_file():
+        return None
+    return f"/pdf/{article_id}"
+
+
+def _pdf_href(row: dict) -> str:
+    """Best PDF link for a row: local /pdf/<id> when the file is harvested,
+    otherwise the (absolutized) DergiPark URL."""
+    url = row.get("pdf_url") or ""
+    if not url:
+        return ""
+    if not url.startswith("http"):
+        url = PDF_BASE_URL + url
+    return _local_pdf_url(row) or url
+
+
+def _apply_local_pdfs(rows: list[dict]) -> list[dict]:
+    """Point every row's pdf_url at our local /pdf route when the file exists."""
+    for row in rows:
+        if row.get("pdf_url"):
+            row["pdf_url"] = _pdf_href(row)
+    return rows
 
 
 _TR_FOLD_TABLE = str.maketrans(
@@ -227,6 +264,7 @@ def search_page(request: Request, q: str = ""):
         article_rows = _apply_match_labels(
             _apply_snippets(queries.search_articles(conn, q, limit=15), q), q
         )
+        _apply_local_pdfs(article_rows)
         author_rows = queries.search_authors(conn, q, limit=10)
         journal_total = queries.count_journals(conn, q)
         article_total = queries.count_articles(conn, q)
@@ -259,6 +297,7 @@ def journal_detail_page(request: Request, short_name: str, page: int = 1):
         rows = _apply_snippets(
             queries.journal_articles(conn, journal["id"], limit=PAGE_SIZE, offset=pg["offset"]), ""
         )
+        _apply_local_pdfs(rows)
     finally:
         conn.close()
     return render(
@@ -269,6 +308,26 @@ def journal_detail_page(request: Request, short_name: str, page: int = 1):
         pg=pg,
         base_url=f"/journals/{short_name}?",
         target="#journal-articles",
+    )
+
+
+@app.get("/pdf/{article_id}")
+def serve_pdf(article_id: int):
+    """Serve a harvested PDF from data/raw_pdfs instead of redirecting to DergiPark."""
+    conn = db_open()
+    try:
+        row = conn.execute(
+            "SELECT oai_identifier FROM articles WHERE id = ?", (article_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="PDF bulunamadı")
+    path = PDF_DIR / pdf_filename(row[0])
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="PDF henüz indirilmemiş")
+    return FileResponse(
+        path, media_type="application/pdf", filename=f"article-{article_id}.pdf"
     )
 
 
@@ -310,6 +369,7 @@ def articles_page(
             ),
             q,
         )
+        _apply_local_pdfs(rows)
         lang_opts = queries.languages(conn)
         year_opts = queries.years(conn)
         type_opts = queries.article_types(conn)
@@ -419,11 +479,13 @@ def article_detail_page(request: Request, article_id: int):
         conn.close()
     if article.get("oai_identifier") and "/" in article["oai_identifier"]:
         article["article_url"] = (
-            f"https://dergipark.org.tr/tr/pub/{article['short_name']}/"
+            f"{PDF_BASE_URL}/tr/pub/{article['short_name']}/"
             f"article/{article['oai_identifier'].split('/')[-1]}"
         )
     else:
         article["article_url"] = None
+    if article.get("pdf_url"):
+        article["pdf_url"] = _pdf_href(article)
     return render(request, "article_detail.html", article=article, similar=similar)
 
 

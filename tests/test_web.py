@@ -356,3 +356,49 @@ def test_missing_db_returns_503(tmp_path, monkeypatch):
     with TestClient(web_app.app) as c:
         resp = c.get("/")
     assert resp.status_code == 503
+
+
+def _seed_pdf_dir(tmp_path, monkeypatch):
+    """Point web_app.PDF_DIR at a tmp dir and create a fake PDF for article 1."""
+    pdf_dir = tmp_path / "raw_pdfs"
+    pdf_dir.mkdir()
+    (pdf_dir / "oai:dergipark.org.tr:article_100.pdf").write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(web_app, "PDF_DIR", pdf_dir)
+
+
+def test_pdf_route_serves_harvested_file(client, tmp_path, monkeypatch):
+    _seed_pdf_dir(tmp_path, monkeypatch)
+    resp = client.get("/pdf/1")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.content == b"%PDF-1.4 fake"
+
+
+def test_pdf_route_missing_article_404(client):
+    resp = client.get("/pdf/99999")
+    assert resp.status_code == 404
+
+
+def test_pdf_route_missing_file_404(client, tmp_path, monkeypatch):
+    pdf_dir = tmp_path / "raw_pdfs"
+    pdf_dir.mkdir()
+    monkeypatch.setattr(web_app, "PDF_DIR", pdf_dir)
+    resp = client.get("/pdf/1")
+    assert resp.status_code == 404
+
+
+def test_article_list_links_local_pdf(client, tmp_path, monkeypatch):
+    _seed_pdf_dir(tmp_path, monkeypatch)
+    resp = client.get("/articles")
+    assert resp.status_code == 200
+    # article 1 has a harvested file -> local link
+    assert 'href="/pdf/1"' in resp.text
+    # article 3 (id % 2 == 1) has pdf_url but no file -> DergiPark fallback
+    assert 'href="https://dergipark.org.tr/pdf/x"' in resp.text
+
+
+def test_article_detail_links_local_pdf(client, tmp_path, monkeypatch):
+    _seed_pdf_dir(tmp_path, monkeypatch)
+    resp = client.get("/articles/1")
+    assert resp.status_code == 200
+    assert 'href="/pdf/1"' in resp.text

@@ -5,6 +5,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from src.utils import PDF_BASE_URL
+
 
 def _json_dumps(obj: list) -> str:
     """Serialize a list to JSON string for storage."""
@@ -229,6 +231,14 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     journal_cols = {row[1] for row in conn.execute("PRAGMA table_info(journals)").fetchall()}
     if "article_count" not in journal_cols:
         conn.execute("ALTER TABLE journals ADD COLUMN article_count INTEGER DEFAULT 0")
+
+    # Old crawls stored relative citation_pdf_url values (e.g.
+    # "/tr/download/article-file/123"); absolutize them in place.
+    conn.execute(
+        "UPDATE articles SET pdf_url = ? || pdf_url "
+        "WHERE pdf_url IS NOT NULL AND pdf_url LIKE '/%'",
+        (PDF_BASE_URL,),
+    )
 
     # Performance indexes
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_oai ON articles(oai_identifier)")

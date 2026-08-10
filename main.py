@@ -572,7 +572,9 @@ async def _run_pipeline(
 
                     # Extract metadata from HTML and update DB
                     try:
-                        html_meta = scrape_article_html_metadata(resp.text)
+                        html_meta = scrape_article_html_metadata(
+                            resp.text, base_url=str(resp.url)
+                        )
                         _update_article_metadata(conn, oai_id, html_meta)
                     except Exception:
                         pass  # Non-fatal: metadata scrape failure shouldn't block PDF

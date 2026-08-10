@@ -13,7 +13,7 @@ import httpx
 from loguru import logger
 from selectolax.parser import HTMLParser
 
-from src.utils import AdaptiveDelay, retry, setup_logger
+from src.utils import AdaptiveDelay, pdf_filename, retry, setup_logger
 
 # DergiPark OAI-PMH base URL (verified live 2026-07, returns 200 + <OAI-PMH>).
 # OAI-PMH is per-journal; single journal URL is "{DERGIPARK_OAI_BASE}/{short_name}"
@@ -42,8 +42,7 @@ PDF_DIR = Path("data/raw_pdfs")
 
 def pdf_destination(oai_id: str) -> Path:
     """Convert an OAI identifier to a PDF file path."""
-    safe_name = oai_id.replace("/", "_") + ".pdf"
-    return PDF_DIR / safe_name
+    return PDF_DIR / pdf_filename(oai_id)
 
 
 def lookup_article_by_oai(conn, oai_id: str):
@@ -445,7 +444,7 @@ def parse_article_metadata(xml_text: str) -> dict:
 PDF_ERRORS_PATH = Path("data/pdf_errors.json")
 
 
-def scrape_article_html_metadata(html: str) -> dict:
+def scrape_article_html_metadata(html: str, base_url: str = "") -> dict:
     """Extract rich metadata from DergiPark article page HTML <meta> tags.
 
     Extracts: abstract, keywords, language, orcid (list), article_type,
@@ -454,6 +453,8 @@ def scrape_article_html_metadata(html: str) -> dict:
 
     Args:
         html: Raw HTML of a DergiPark article detail page.
+        base_url: Article page URL; used to absolutize a relative
+            citation_pdf_url (DergiPark serves it as "/tr/download/...").
 
     Returns:
         Dict with extracted fields. Empty string/list for missing fields.
@@ -514,7 +515,7 @@ def scrape_article_html_metadata(html: str) -> dict:
         elif name == "dc.identifier.pagenumber":
             result["pages"] = content
         elif name == "citation_pdf_url":
-            result["pdf_url"] = content
+            result["pdf_url"] = _resolve_pdf_url(base_url, content)
         elif (name == "citation_journal_title" or name == "dc.source") and not result[
             "journal_title"
         ]:
@@ -551,9 +552,12 @@ def _resolve_pdf_url(base_url: str, href: str) -> str:
         href: The href attribute from an <a> tag.
 
     Returns:
-        Absolute URL string.
+        Absolute URL string (unchanged href when it is already absolute
+        or no base_url is given).
     """
     if href.startswith("http"):
+        return href
+    if not base_url:
         return href
     if href.startswith("/"):
         parsed = urlparse(base_url)

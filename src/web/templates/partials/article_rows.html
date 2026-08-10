@@ -24,7 +24,7 @@
             {% if a.is_oa %}<span class="badge badge-oa">{{ icons.ic("check", 13) }} Açık Erişim</span>
             {% else %}<span class="badge badge-oa-pad">{{ icons.ic("lock", 12) }} Kapalı</span>{% endif %}
             {% if a.pdf_url %}
-            <span>{{ icons.ic("pdf", 13) }}<a href="/articles/{{ a.id }}" class="badge">PDF</a></span>
+            <span>{{ icons.ic("pdf", 13) }}<a href="{{ a.pdf_url }}" target="_blank" rel="noopener" class="badge">PDF</a></span>
             {% endif %}
         </div>
     </article>

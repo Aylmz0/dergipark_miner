@@ -11,6 +11,18 @@ from pathlib import Path
 
 from loguru import logger
 
+# DergiPark serves PDFs and article pages from this host.
+PDF_BASE_URL = "https://dergipark.org.tr"
+
+
+def pdf_filename(oai_id: str) -> str:
+    """Map an OAI identifier to the harvested PDF filename.
+
+    Stored under data/raw_pdfs as "<oai:...>_<id>.<ext>" — the same
+    normalized name the crawler writes (crawler.pdf_destination).
+    """
+    return (oai_id or "").replace("/", "_") + ".pdf"
+
 
 def retry(
     max_attempts: int = 5,
