@@ -20,7 +20,7 @@ _ARTICLE_COLS = """a.id, a.journal_id, j.short_name, j.name AS journal_name,
        a.keywords, a.language, a.journal_title, a.issn, a.publisher,
        a.volume, a.issue, a.firstpage, a.lastpage, a.pages, a.pdf_url,
        a.orcid, a.article_type, a.[references], a.is_oa, a.enriched_at,
-       a.content_hash, a.created_at,
+       a.content_hash, a.created_at, a.author_institutions,
        (SELECT GROUP_CONCAT(au.name, ', ') FROM authors au
         WHERE au.article_id = a.id) AS authors_csv"""
 
@@ -465,6 +465,48 @@ def _article_query(
         (*params, limit, offset),
     )
     return _rows(cur)
+
+
+def iter_articles(
+    conn: sqlite3.Connection,
+    search: str = "",
+    language: str = "",
+    is_oa: str = "",
+    year: str = "",
+    pdf: str = "",
+    article_type: str = "",
+    sort: str = "date_desc",
+    batch_size: int = 1000,
+):
+    """Stream filtered article rows as dicts (export endpoints).
+
+    Same filters as search_articles but streams via fetchmany instead of
+    materializing the whole result set. Generator: one yield per row.
+    """
+    order_sql = _ARTICLE_SORTS.get(sort, _ARTICLE_SORTS["date_desc"])
+    where, params, _ = _article_where(search, language, is_oa, year, pdf, article_type)
+    select_sql = _ARTICLE_COLS
+    if search.strip():
+        _, score_expr, score_params, _ = _article_search(search)
+        order_sql = "ORDER BY score DESC, a.publication_date DESC, a.id DESC"
+        select_sql = f"{_ARTICLE_COLS}, ({score_expr}) AS score"
+        params = (*score_params, *params)
+    cur = conn.execute(
+        f"""
+        SELECT {select_sql}
+        FROM articles a
+        JOIN journals j ON j.id = a.journal_id
+        {where}
+        {order_sql}
+        """,
+        params,
+    )
+    while True:
+        batch = cur.fetchmany(batch_size)
+        if not batch:
+            break
+        for row in batch:
+            yield dict(zip((d[0] for d in cur.description), row, strict=False))
 
 
 def get_article(conn: sqlite3.Connection, article_id: int) -> dict | None:

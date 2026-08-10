@@ -71,6 +71,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
             orcid          TEXT,
             article_type   TEXT,
             [references]   TEXT,
+            author_institutions TEXT,
             metadata       TEXT,
             is_oa          INTEGER,
             enriched_at    TEXT,
@@ -109,6 +110,7 @@ def init_db(path: str | Path) -> sqlite3.Connection:
         ("orcid", "TEXT"),
         ("article_type", "TEXT"),
         ("[references]", "TEXT"),
+        ("author_institutions", "TEXT"),
         ("metadata", "TEXT"),
         ("is_oa", "INTEGER"),
     ]

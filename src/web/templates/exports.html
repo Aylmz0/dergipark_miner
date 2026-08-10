@@ -4,17 +4,90 @@
 {% block content %}
 <h2>Veri Export</h2>
 
-{% if export_.exists %}
-<article>
-    <header><h3>all_articles.jsonl</h3></header>
-    <div class="kv-line"><strong>Boyut</strong> <span>{{ export_.size_mb }} MB</span></div>
-    <div class="kv-line"><strong>Son güncelleme</strong> <span class="mono">{{ export_.modified }}</span></div>
-    <p>Her satır bir makale; 22 alan (title, authors, abstract, keywords, DOI, is_oa, pdf_url, references vb.).</p>
-    <a role="button" href="/api/export.jsonl">{{ icons.ic("download", 15) }} İndir ({{ export_.size_mb }} MB)</a>
-</article>
-{% else %}
-<p class="muted">Export dosyası henüz oluşturulmamış. İlk hasat sonrası <span class="mono">data/exports/all_articles.jsonl</span> altında oluşur.</p>
-{% endif %}
+<section>
+    <article>
+        <header><h3>Makaleler (filtresiz, tam arşiv)</h3></header>
+        {% if export_.exists %}
+        <div class="kv-line"><strong>Boyut</strong> <span>{{ export_.size_mb }} MB</span></div>
+        <div class="kv-line"><strong>Son güncelleme</strong> <span class="mono">{{ export_.modified }}</span></div>
+        <p>Her satır bir makale; 22 alan (title, authors, abstract, keywords, DOI, is_oa, pdf_url, references vb.).</p>
+        <p>
+            <a class="btn-paper" href="/api/export.jsonl">{{ icons.ic("download", 15) }} JSONL İndir ({{ export_.size_mb }} MB)</a>
+        </p>
+        {% else %}
+        <p class="muted">Export dosyası henüz oluşturulmamış. İlk hasat sonrası <span class="mono">data/exports/all_articles.jsonl</span> altında oluşur.</p>
+        {% endif %}
+    </article>
+</section>
+
+<section>
+    <article>
+        <header><h3>Makaleler (filtreli)</h3></header>
+        <p>Filtreleri uygulayıp yalnızca eşleşen kayıtları indir. JSONL: her satır bir makale (tüm alanlar). CSV: UTF-8 (Excel uyumlu), liste alanları <span class="mono">;</span> ile ayrılır.</p>
+        <form id="export-filters" class="filter-form" method="get" action="/api/export.articles">
+            <div class="filter-grid">
+                <label>Arama
+                    <input type="text" name="q" placeholder="başlık, özet, yazar…">
+                </label>
+                <label>Dil
+                    <select name="language">
+                        <option value="">Tümü</option>
+                        {% for lang in lang_opts %}<option value="{{ lang }}">{{ lang }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label>Yıl
+                    <select name="year">
+                        <option value="">Tümü</option>
+                        {% for y in year_opts %}<option value="{{ y }}">{{ y }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label>Tür
+                    <select name="type">
+                        <option value="">Tümü</option>
+                        {% for t in type_opts %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+                    </select>
+                </label>
+                <label>Açık erişim
+                    <select name="oa">
+                        <option value="">Fark etmez</option>
+                        <option value="1">Yalnızca OA</option>
+                        <option value="0">Yalnızca kapalı</option>
+                    </select>
+                </label>
+                <label>PDF
+                    <select name="pdf">
+                        <option value="">Fark etmez</option>
+                        <option value="1">PDF'li olanlar</option>
+                        <option value="0">PDF'sizler</option>
+                    </select>
+                </label>
+                <label>Sıralama
+                    <select name="sort">
+                        <option value="date_desc">Tarih (yeni→eski)</option>
+                        <option value="date_asc">Tarih (eski→yeni)</option>
+                        <option value="title">Başlık (A–Z)</option>
+                        <option value="journal">Dergi (A–Z)</option>
+                    </select>
+                </label>
+            </div>
+            <p>
+                <button class="btn-paper" type="submit">{{ icons.ic("download", 15) }} JSONL İndir</button>
+                <button class="btn-paper" type="submit" formaction="/api/export.articles.csv" formmethod="get">{{ icons.ic("download", 15) }} CSV İndir</button>
+            </p>
+        </form>
+    </article>
+</section>
+
+<section>
+    <article>
+        <header><h3>Dergiler</h3></header>
+        <p>Tüm dergiler: kısa ad, tam ad, deklare sayı, hasat edilen, PDF sayısı, son yayın tarihi.</p>
+        <p>
+            <a class="btn-paper" href="/api/export.journals">{{ icons.ic("download", 15) }} JSONL İndir</a>
+            <a class="btn-paper" href="/api/export.journals.csv">{{ icons.ic("download", 15) }} CSV İndir</a>
+        </p>
+    </article>
+</section>
 
 <section>
     <h3>İlgili Dosyalar</h3>

@@ -66,6 +66,7 @@ def export_all_articles(
                a.journal_title, a.issn, a.publisher, a.volume, a.issue,
                a.firstpage, a.lastpage, a.pages, a.pdf_url,
                a.orcid, a.article_type, a.[references], a.is_oa,
+               a.author_institutions,
                j.short_name,
                GROUP_CONCAT(au.name, '||') AS author_names
         FROM articles a
@@ -85,7 +86,7 @@ def export_all_articles(
                 break
             for article in batch:
                 try:
-                    authors = [n for n in (article[22] or "").split("||") if n]
+                    authors = [n for n in (article[23] or "").split("||") if n]
                     row = _build_row(article, authors)
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                     succeeded += 1
@@ -110,11 +111,12 @@ def _build_row(article: tuple, authors: list[str]) -> dict:
         Dict ready for JSON serialization.
     """
     oai_id = article[4] or ""
-    slug = article[21]
+    slug = article[22]
     article_number = oai_id.split("/")[-1] if "/" in oai_id else ""
     url = (
         f"https://dergipark.org.tr/tr/pub/{slug}/article/{article_number}" if article_number else ""
     )
+    references = _json_loads(article[19])
 
     return {
         "slug": slug,
@@ -139,5 +141,7 @@ def _build_row(article: tuple, authors: list[str]) -> dict:
         "pdf_url": article[16] or None,
         "orcid": _json_loads(article[17]),
         "article_type": article[18] or "",
-        "references": _json_loads(article[19]),
+        "references": references,
+        "references_count": len(references),
+        "author_institutions": _json_loads(article[21]),
     }

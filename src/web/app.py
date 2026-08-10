@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -383,6 +383,24 @@ def _parse_keywords(value) -> list[str]:
     return out
 
 
+def _parse_list(value) -> list[str]:
+    """Parse a JSON-array column into a list of strings; [] on failure."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    text = value.strip()
+    if not text.startswith("["):
+        return [text]
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if item]
+    except json.JSONDecodeError:
+        return [text]
+    return []
+
+
 @app.get("/articles/{article_id}", response_class=HTMLResponse)
 def article_detail_page(request: Request, article_id: int):
     conn = db_open()
@@ -391,6 +409,8 @@ def article_detail_page(request: Request, article_id: int):
         if article is None:
             raise HTTPException(status_code=404, detail="Makale bulunamadı")
         article["_keyword_list"] = _parse_keywords(article.get("keywords"))
+        article["_institutions_list"] = _parse_list(article.get("author_institutions"))
+        article["_references_list"] = _parse_list(article.get("references"))
         similar = _apply_snippets(
             queries.similar_articles(conn, article_id, article["_keyword_list"]),
             "",
@@ -409,7 +429,21 @@ def article_detail_page(request: Request, article_id: int):
 
 @app.get("/exports", response_class=HTMLResponse)
 def exports_page(request: Request):
-    return render(request, "exports.html", export_=export_view())
+    conn = db_open()
+    try:
+        lang_opts = queries.languages(conn)
+        year_opts = queries.years(conn)
+        type_opts = queries.article_types(conn)
+    finally:
+        conn.close()
+    return render(
+        request,
+        "exports.html",
+        export_=export_view(),
+        lang_opts=lang_opts,
+        year_opts=year_opts,
+        type_opts=type_opts,
+    )
 
 
 @app.get("/api/export.jsonl")
@@ -418,6 +452,192 @@ def export_jsonl():
         raise HTTPException(status_code=404, detail="Export hazır değil")
     return FileResponse(
         EXPORT_PATH, media_type="application/x-ndjson", filename="all_articles.jsonl"
+    )
+
+
+def _export_params(
+    q: str,
+    language: str,
+    oa: str,
+    year: str,
+    pdf: str,
+    type: str,
+    sort: str,
+) -> dict:
+    """Normalize shared filter params for streaming export endpoints."""
+    return {
+        "search": q.strip(),
+        "language": language,
+        "is_oa": oa,
+        "year": year,
+        "pdf": pdf,
+        "article_type": type,
+        "sort": sort or "date_desc",
+    }
+
+
+def _flatten_article(article: dict) -> dict:
+    """Normalize a raw article row into CSV-serializable scalar fields."""
+    out = dict(article)
+    for col in ("keywords", "orcid", "references", "author_institutions"):
+        if isinstance(out.get(col), str):
+            text = out[col].strip()
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        out[col] = parsed
+                except json.JSONDecodeError:
+                    pass
+        if isinstance(out.get(col), list):
+            out[col] = "; ".join(str(item) for item in out[col] if item)
+        elif not isinstance(out.get(col), (str, int, float)) or out.get(col) is None:
+            out[col] = ""
+    for key, value in out.items():
+        if value is None:
+            out[key] = ""
+        elif isinstance(value, (int, float)):
+            out[key] = value
+        else:
+            out[key] = str(value)
+    return out
+
+
+_ARTICLE_CSV_COLS = [
+    "id",
+    "short_name",
+    "journal_name",
+    "title",
+    "authors_csv",
+    "doi",
+    "publication_date",
+    "oai_identifier",
+    "abstract",
+    "keywords",
+    "language",
+    "journal_title",
+    "issn",
+    "publisher",
+    "volume",
+    "issue",
+    "firstpage",
+    "lastpage",
+    "pages",
+    "pdf_url",
+    "orcid",
+    "article_type",
+    "references",
+    "is_oa",
+    "author_institutions",
+    "enriched_at",
+]
+
+_JOURNAL_CSV_COLS = ["id", "short_name", "name", "article_count", "harvested", "pdfs", "latest_date"]
+
+
+def _stream_rows(gen, conn):
+    """Yield rows from gen, closing conn when streaming finishes."""
+    try:
+        yield from gen
+    finally:
+        conn.close()
+
+
+def _gen_jsonl(rows):
+    """Yield one JSONL line per streamed row."""
+    for row in rows:
+        yield json.dumps(row, ensure_ascii=False) + "\n"
+
+
+def _gen_csv(rows, cols: list[str]):
+    """Yield CSV lines; first chunk carries a UTF-8 BOM for Excel."""
+    yield "\ufeff"
+    for row in rows:
+        flat = _flatten_article(row)
+        yield ",".join(_csv_cell(flat.get(col)) for col in cols) + "\n"
+
+
+def _csv_cell(value) -> str:
+    """Quote a CSV cell per RFC 4180 (doubled quotes, comma-safe)."""
+    if value is None:
+        return ""
+    text = str(value)
+    if any(ch in text for ch in (",", '"', "\n", "\r")):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
+@app.get("/api/export.articles")
+def export_articles_stream(
+    q: str = "",
+    language: str = "",
+    oa: str = "",
+    year: str = "",
+    pdf: str = "",
+    type: str = "",
+    sort: str = "date_desc",
+):
+    """Stream filtered articles as JSONL (in-memory, no temp file)."""
+    conn = db_open()
+    rows = _stream_rows(
+        queries.iter_articles(
+            conn, **_export_params(q, language, oa, year, pdf, type, sort)
+        ),
+        conn,
+    )
+    return StreamingResponse(
+        _gen_jsonl(rows),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="articles.jsonl"'},
+    )
+
+
+@app.get("/api/export.articles.csv")
+def export_articles_csv(
+    q: str = "",
+    language: str = "",
+    oa: str = "",
+    year: str = "",
+    pdf: str = "",
+    type: str = "",
+    sort: str = "date_desc",
+):
+    """Stream filtered articles as CSV (UTF-8 BOM for Excel)."""
+    conn = db_open()
+    rows = _stream_rows(
+        queries.iter_articles(
+            conn, **_export_params(q, language, oa, year, pdf, type, sort)
+        ),
+        conn,
+    )
+    return StreamingResponse(
+        _gen_csv(rows, _ARTICLE_CSV_COLS),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="articles.csv"'},
+    )
+
+
+@app.get("/api/export.journals")
+def export_journals_stream(q: str = ""):
+    """Stream journals as JSONL."""
+    conn = db_open()
+    rows = _stream_rows(queries.search_journals(conn, q, limit=1_000_000), conn)
+    return StreamingResponse(
+        _gen_jsonl(rows),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="journals.jsonl"'},
+    )
+
+
+@app.get("/api/export.journals.csv")
+def export_journals_csv(q: str = ""):
+    """Stream journals as CSV (UTF-8 BOM for Excel)."""
+    conn = db_open()
+    rows = _stream_rows(queries.search_journals(conn, q, limit=1_000_000), conn)
+    return StreamingResponse(
+        _gen_csv(rows, _JOURNAL_CSV_COLS),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="journals.csv"'},
     )
 
 

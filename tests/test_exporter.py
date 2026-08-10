@@ -43,6 +43,11 @@ def test_export_all_articles(tmp_path, conn):
 
 def test_export_all_articles_structure(tmp_path, conn):
     _seed_db(conn)
+    conn.execute(
+        "UPDATE articles SET [references] = ?, author_institutions = ? WHERE id = 1",
+        ('["Ref A", "Ref B"]', '["UNIV A"]'),
+    )
+    conn.commit()
     out = export_all_articles(conn, tmp_path / "all.jsonl")
     first = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
     assert first["slug"] == "ihad"
@@ -67,7 +72,9 @@ def test_export_all_articles_structure(tmp_path, conn):
     assert first["keywords"] == []
     assert first["orcid"] == []
     assert first["article_type"] == ""
-    assert first["references"] == []
+    assert first["references"] == ["Ref A", "Ref B"]
+    assert first["references_count"] == 2
+    assert first["author_institutions"] == ["UNIV A"]
 
 
 def test_export_all_articles_no_doi(tmp_path, conn):

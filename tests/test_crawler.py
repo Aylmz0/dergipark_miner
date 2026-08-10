@@ -504,6 +504,8 @@ def test_scrape_article_html_metadata_extracts_all():
     <meta name="citation_language" content="en" />
     <meta name="citation_author_orcid" content="0000-0001-2345-6789" />
     <meta name="citation_author_orcid" content="0000-0002-3456-7890" />
+    <meta name="citation_author_institution" content="UNIV A" />
+    <meta name="citation_author_institution" content="UNIV B" />
     <meta name="DC.Type.articleType" content="Research Article" />
     <meta name="DC.Source.ISSN" content="1234-5678" />
     <meta name="DC.Source.Issue" content="39" />
@@ -523,6 +525,7 @@ def test_scrape_article_html_metadata_extracts_all():
     assert result["keywords"] == ["keyword1", "keyword2", "keyword3"]
     assert result["language"] == "en"
     assert result["orcid"] == ["0000-0001-2345-6789", "0000-0002-3456-7890"]
+    assert result["author_institutions"] == ["UNIV A", "UNIV B"]
     assert result["article_type"] == "Research Article"
     assert result["issn"] == "1234-5678"
     assert result["issue"] == "39"
@@ -544,6 +547,7 @@ def test_scrape_article_html_metadata_empty():
     assert result["keywords"] == []
     assert result["language"] == ""
     assert result["orcid"] == []
+    assert result["author_institutions"] == []
     assert result["article_type"] == ""
     assert result["issn"] == ""
     assert result["issue"] == ""

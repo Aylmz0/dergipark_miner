@@ -44,12 +44,14 @@ def test_update_article_metadata_fills_empty_fields(conn):
         "orcid": "0000-0000-0000-0000",
         "article_type": "research-article",
         "references": ["Ref 1", "Ref 2"],
+        "author_institutions": ["UNIV A", "UNIV B"],
     }
     _update_article_metadata(conn, "oai:dergipark.org.tr:article/12345", html_meta)
 
     row = conn.execute(
         "SELECT abstract, language, journal_title, issn, publisher, volume, issue, "
-        "firstpage, lastpage, pages, pdf_url, article_type, is_oa "
+        "firstpage, lastpage, pages, pdf_url, article_type, is_oa, [references], "
+        "author_institutions "
         "FROM articles WHERE oai_identifier = ?",
         ("oai:dergipark.org.tr:article/12345",),
     ).fetchone()
@@ -67,6 +69,8 @@ def test_update_article_metadata_fills_empty_fields(conn):
     assert row[10] == "https://example.com/paper.pdf"  # pdf_url
     assert row[11] == "research-article"  # article_type
     assert row[12] == 1  # is_oa (set because pdf_url exists)
+    assert json.loads(row[13]) == ["Ref 1", "Ref 2"]  # references
+    assert json.loads(row[14]) == ["UNIV A", "UNIV B"]  # author_institutions
 
 
 def test_update_article_metadata_does_not_overwrite_existing(conn):

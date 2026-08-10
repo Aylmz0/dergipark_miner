@@ -299,13 +299,53 @@ def test_failures_gone(client):
 def test_exports_page(client):
     resp = client.get("/exports")
     assert resp.status_code == 200
-    assert "all_articles.jsonl" in resp.text
+    assert "Makaleler" in resp.text
+    assert "/api/export.articles" in resp.text
+    assert "btn-paper" in resp.text
 
 
 def test_export_download(client):
     resp = client.get("/api/export.jsonl")
     assert resp.status_code == 200
     assert resp.content == b'{"title": "x"}\n'
+
+
+def test_export_articles_jsonl_filters(client):
+    resp = client.get("/api/export.articles?language=tur&oa=1")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/x-ndjson")
+    rows = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert rows and all(r["language"] == "tur" for r in rows)
+
+
+def test_export_articles_csv_bom(client):
+    resp = client.get("/api/export.articles.csv")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/csv")
+    assert resp.content.startswith(b"\xef\xbb\xbf")
+
+
+def test_export_articles_csv_rows(client):
+    resp = client.get("/api/export.articles.csv?language=tur")
+    body = resp.content.decode("utf-8-sig")
+    lines = body.strip().splitlines()
+    assert len(lines) == 4  # 3 tur makale + başlıksız 4. si de tur
+
+
+def test_export_journals_jsonl(client):
+    resp = client.get("/api/export.journals")
+    assert resp.status_code == 200
+    rows = [json.loads(line) for line in resp.text.strip().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["short_name"] == "abantmedj"
+
+
+def test_export_journals_csv(client):
+    resp = client.get("/api/export.journals.csv")
+    assert resp.status_code == 200
+    assert resp.content.startswith(b"\xef\xbb\xbf")
+    body = resp.content.decode("utf-8-sig")
+    assert "abantmedj" in body
 
 
 def test_missing_db_returns_503(tmp_path, monkeypatch):

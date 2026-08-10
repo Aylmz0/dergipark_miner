@@ -7,7 +7,7 @@
     <header><h2>{{ article.title or "Başlıksız Makale" }}</h2></header>
     <div class="kv-line"><strong>Dergi</strong> <a href="/journals/{{ article.short_name }}">{{ article.journal_name }}</a></div>
     {% if article.authors %}
-    <div class="kv-line"><strong>Yazarlar</strong> <span>{% for au in article.authors %}{% if not loop.first %} · {% endif %}<a href="/articles?q={{ au|urlencode }}">{{ au }}</a>{% endfor %}</span></div>
+    <div class="kv-line"><strong>Yazarlar</strong> <span>{% for au in article.authors %}{% if not loop.first %} · {% endif %}<a href="/articles?q={{ au|urlencode }}">{{ au }}</a>{% if article._institutions_list and loop.index0 < article._institutions_list|length %}<span class="auth-inst"> — {{ article._institutions_list[loop.index0] }}</span>{% endif %}{% endfor %}</span></div>
     {% endif %}
     <div class="kv-line"><strong>Yayın tarihi</strong> <span class="mono">{{ article.publication_date or "—" }}</span></div>
     {% if article.article_type %}
@@ -39,6 +39,17 @@
     <details open>
         <summary>Özet</summary>
         <p class="wrap">{{ article.abstract }}</p>
+    </details>
+    {% endif %}
+
+    {% if article._references_list %}
+    <details>
+        <summary>Kaynakça ({{ article._references_list|length }})</summary>
+        <ol class="ref-list">
+            {% for ref in article._references_list %}
+            <li>{{ ref }}</li>
+            {% endfor %}
+        </ol>
     </details>
     {% endif %}
 

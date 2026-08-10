@@ -155,7 +155,8 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
     cur = conn.execute(
         "SELECT abstract, keywords, language, journal_title, issn, publisher, "
         "volume, issue, firstpage, lastpage, pages, pdf_url, orcid, "
-        "article_type, [references], metadata FROM articles WHERE id = ?",
+        "article_type, [references], author_institutions, metadata "
+        "FROM articles WHERE id = ?",
         (article_id,),
     ).fetchone()
     if not cur:
@@ -177,6 +178,7 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
         cur_orcid,
         cur_article_type,
         cur_references,
+        cur_author_institutions,
         cur_metadata,
     ) = cur
 
@@ -208,6 +210,12 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
     _add("orcid", cur_orcid, html_meta.get("orcid"), serialize=True)
     _add("article_type", cur_article_type, html_meta.get("article_type"))
     _add("[references]", cur_references, html_meta.get("references"), serialize=True)
+    _add(
+        "author_institutions",
+        cur_author_institutions,
+        html_meta.get("author_institutions"),
+        serialize=True,
+    )
 
     # metadata: store full meta dict
     if not cur_metadata and html_meta:

@@ -265,6 +265,36 @@ hr {
 }
 .pager .pager-dot { color: var(--pico-muted-color); }
 
+/* ---------- Export buttons (pager look) ---------- */
+.btn-paper {
+    display: inline-block;
+    padding: 0.22rem 0.8rem;
+    margin: 0;
+    background: var(--pico-card-background-color);
+    border: 1px solid var(--pico-border-color);
+    border-radius: 0;
+    color: var(--pico-primary);
+    font-family: var(--pico-font-family);
+    font-size: 0.85rem;
+    text-decoration: none;
+    cursor: pointer;
+}
+.btn-paper:hover {
+    background: #e6dfc9;
+    text-decoration: underline;
+}
+.filter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.5rem 1rem;
+    margin-bottom: 0.7rem;
+}
+.filter-grid label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.82rem; margin: 0; }
+.filter-grid input, .filter-grid select { margin: 0; padding: 0.3rem 0.6rem; font-size: 0.85rem; }
+.auth-inst { color: var(--pico-muted-color); font-size: 0.82rem; }
+.ref-list { padding-left: 1.3rem; font-size: 0.9rem; max-height: 26rem; overflow-y: auto; }
+.ref-list li { margin: 0.25rem 0; }
+
 /* ---------- Details/summary ---------- */
 details { margin-bottom: 0.9rem; }
 
@@ -281,7 +311,7 @@ details { margin-bottom: 0.9rem; }
 /* ---------- 90s cleanup: kill modern UI remnants ---------- */
 * { box-shadow: none !important; }
 article, input, select, button, textarea, .badge, .stat-card, .result-card,
-.nav-search input[type="search"], .pager a[role="button"] {
+.nav-search input[type="search"], .pager a[role="button"], .btn-paper {
     border-radius: 0 !important;
 }
 header, article, .result-card, .stat-card, form,
