@@ -11,6 +11,110 @@ def _json_dumps(obj: list) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
 
+def _fold(text: str | None) -> str:
+    """Fold text for search indexing, matching queries._fold_text.
+
+    Lowercase + Turkish-case unification: dotted/dotless i, digraphs
+    (ş/ğ/ü/ö/ç) and circumflex vowels. 'İ' must map to 'i' BEFORE lower()
+    (lower('İ') gives 'i\u0307' — i + combining dot — which breaks both
+    LIKE and the FTS trigram index).
+    """
+    if not text:
+        return ""
+    return (
+        text.replace("İ", "i")
+        .lower()
+        .replace("ı", "i")
+        .replace("ş", "s")
+        .replace("ğ", "g")
+        .replace("ü", "u")
+        .replace("ö", "o")
+        .replace("ç", "c")
+        .replace("î", "i")
+        .replace("â", "a")
+        .replace("û", "u")
+    )
+
+
+_FTS_SUPPORTED: bool | None = None
+
+
+def _fts_supported() -> bool:
+    """True when this SQLite build has FTS5 with the trigram tokenizer."""
+    global _FTS_SUPPORTED
+    if _FTS_SUPPORTED is None:
+        try:
+            probe = sqlite3.connect(":memory:")
+            probe.execute("CREATE VIRTUAL TABLE t USING fts5(x, tokenize='trigram')")
+            probe.close()
+            _FTS_SUPPORTED = True
+        except sqlite3.OperationalError:
+            _FTS_SUPPORTED = False
+    return _FTS_SUPPORTED
+
+
+_FTS_COLUMNS = (
+    "rowid, title, abstract, keywords, jtitle, jname, atype, publisher, "
+    "doi, issn, volume, issue, pages, oai, refs, authors"
+)
+
+_FTS_SELECT = """
+    SELECT a.id, a.title, a.abstract, a.keywords,
+           a.journal_title, j.name, a.article_type,
+           a.publisher, a.doi, a.issn, a.volume, a.issue,
+           a.pages, a.oai_identifier, a.[references],
+           (SELECT GROUP_CONCAT(au.name, ' ')
+            FROM authors au WHERE au.article_id = a.id)
+    FROM articles a LEFT JOIN journals j ON j.id = a.journal_id
+"""
+
+
+def _init_fts(conn: sqlite3.Connection) -> None:
+    """Create the FTS5 index and backfill it from existing articles.
+
+    Runs on every init_db. Rebuilds the index only when the article
+    count differs from the indexed count (new DB, or schema upgrade).
+    """
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5("
+        "title, abstract, keywords, jtitle, jname, atype, publisher, "
+        "doi, issn, volume, issue, pages, oai, refs, authors, "
+        "tokenize='trigram')"
+    )
+    articles = conn.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
+    indexed = conn.execute("SELECT COUNT(*) FROM articles_fts").fetchone()[0]
+    if indexed == articles:
+        return
+    conn.execute("DELETE FROM articles_fts")
+    rows = conn.execute(_FTS_SELECT).fetchall()
+    conn.executemany(
+        f"INSERT INTO articles_fts ({_FTS_COLUMNS}) VALUES "
+        f"({', '.join('?' * 16)})",
+        [(r[0], *[_fold(v) for v in r[1:]]) for r in rows],
+    )
+
+
+def fts_sync(conn: sqlite3.Connection, article_id: int) -> None:
+    """Reindex one article row (and its authors) into articles_fts.
+
+    Call after any INSERT/UPDATE on articles or authors. Standalone FTS
+    table (no triggers): the application keeps it in sync explicitly.
+    """
+    if not _fts_supported():
+        return
+    row = conn.execute(
+        f"{_FTS_SELECT} WHERE a.id = ?", (article_id,)
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute("DELETE FROM articles_fts WHERE rowid = ?", (article_id,))
+    conn.execute(
+        f"INSERT INTO articles_fts ({_FTS_COLUMNS}) VALUES "
+        f"({', '.join('?' * 16)})",
+        (row[0], *[_fold(v) for v in row[1:]]),
+    )
+
+
 def init_db(path: str | Path) -> sqlite3.Connection:
     """Initialize the database schema and return a connection.
 
@@ -131,6 +235,10 @@ def init_db(path: str | Path) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_enriched ON articles(enriched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_hash ON articles(content_hash)")
+
+    # Full-text index (FTS5 + trigram) for fast article search
+    if _fts_supported():
+        _init_fts(conn)
 
     conn.commit()
     return conn
@@ -325,6 +433,7 @@ def insert_article(conn: sqlite3.Connection, article: dict) -> int:
         article_id = cur.lastrowid
 
     _write_authors(conn, article_id, authors)
+    fts_sync(conn, article_id)
     return article_id
 
 

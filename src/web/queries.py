@@ -45,6 +45,14 @@ _SEARCH_SCORES = {
 _AUTHOR_SCORE = 6
 _JOURNAL_SCORE = 6
 
+# bm25 column weights, in articles_fts column order:
+# title, abstract, keywords, jtitle, jname, atype, publisher, doi,
+# issn, volume, issue, pages, oai, refs, authors
+_FTS_WEIGHTS = (
+    10.0, 2.0, 6.0, 6.0, 6.0, 5.0, 5.0, 4.0, 4.0,
+    3.0, 3.0, 3.0, 3.0, 1.0, 6.0,
+)
+
 
 def register(conn: sqlite3.Connection) -> None:
     """Register search/misc SQLite functions on a connection (idempotent)."""
@@ -66,11 +74,16 @@ def _fold_text(text: str | None) -> str:
 
     Unifies dotted/dotless i and the Turkish digraph markers so that
     "İstanbul", "istanbul", "Istanbul" and "ıstanbul" all match each other.
+
+    NOTE: 'İ' must map to 'i' BEFORE lower() — lower('İ') yields 'i\u0307'
+    (i + combining dot), which would break matching for both LIKE and the
+    FTS trigram index.
     """
     if not text:
         return ""
     return (
-        text.lower()
+        text.replace("İ", "i")
+        .lower()
         .replace("ı", "i")
         .replace("ş", "s")
         .replace("ğ", "g")
@@ -91,6 +104,30 @@ def _fold_pattern(term: str) -> str:
 def _pattern(col: str) -> str:
     """SQL fragment: fold(col) LIKE '%'||fold(?)||'%' ESCAPE '\\' (param 'p')."""
     return f"tr_fold({col}) LIKE '%' || tr_fold(?) || '%' ESCAPE '\\'"
+
+
+def _fts_available(conn: sqlite3.Connection) -> bool:
+    """True when the FTS5 index table exists in this database."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'articles_fts'"
+    ).fetchone()
+    return bool(row)
+
+
+def _fts_phrase(terms: list[str]) -> str | None:
+    """Build an FTS5 MATCH string: folded quoted phrases ANDed together.
+
+    Returns None when FTS cannot serve the query (any term shorter than
+    the trigram minimum of 3 chars, or containing a double quote), so the
+    caller falls back to the LIKE-based path.
+    """
+    phrases: list[str] = []
+    for term in terms:
+        t = _fold_text(term).strip()
+        if len(t) < 3 or '"' in t:
+            return None
+        phrases.append(f'"{t}"')
+    return " AND ".join(phrases)
 
 
 def _rows(cur: sqlite3.Cursor) -> list[dict]:
@@ -270,17 +307,29 @@ def article_types(conn: sqlite3.Connection) -> list[str]:
     ]
 
 
-def _article_search(search: str) -> tuple[str, str, tuple]:
+def _article_search(
+    conn: sqlite3.Connection, search: str
+) -> tuple[str, str, tuple, tuple]:
     """Build per-term AND clause + relevance score expr for a search query.
 
     Multi-word queries: every term must match somewhere (AND), and each
     term's score is summed across fields it matches. Returns
     (clause, score_expr, params); params feed both the clause and the score
     expr, in the same order.
+
+    Two paths:
+    - FTS path (default when the articles_fts trigram index exists and
+      every term is >= 3 chars): a single `f.articles_fts MATCH ?` clause.
+      Authors and journal names are part of the index, so the per-term
+      author/journal EXISTS checks are skipped in the WHERE clause but kept
+      in the score expression.
+    - LIKE fallback: per-term `tr_match(haystack, ?) OR author_ex OR
+      journal_ex` clauses, matching the pre-FTS behavior.
     """
     terms = [t for t in search.split() if t]
     if not terms:
         return "", "", (), ()
+    fts_phrase = _fts_phrase(terms) if _fts_available(conn) else None
     haystack = (
         "COALESCE(a.title, '')||'\n'||COALESCE(a.abstract, '')||'\n'||"
         "COALESCE(a.keywords, '')||'\n'||COALESCE(a.journal_title, '')||'\n'||"
@@ -296,7 +345,6 @@ def _article_search(search: str) -> tuple[str, str, tuple]:
     where_params: list[object] = []
     for term in terms:
         p = _fold_pattern(term)
-        term_clauses: list[str] = [f"tr_match({haystack}, ?)"]
         for col, weight in _SEARCH_SCORES.items():
             pat = _pattern(col)
             score_parts.append(f"CASE WHEN {pat} THEN {weight} ELSE 0 END")
@@ -308,45 +356,58 @@ def _article_search(search: str) -> tuple[str, str, tuple]:
             f"EXISTS (SELECT 1 FROM journals j2 WHERE j2.id = a.journal_id "
             f"AND {_pattern('j2.name')})"
         )
-        term_clauses.extend([author_ex, journal_ex])
         score_parts.append(f"CASE WHEN {author_ex} THEN {_AUTHOR_SCORE} ELSE 0 END")
         score_parts.append(f"CASE WHEN {journal_ex} THEN {_JOURNAL_SCORE} ELSE 0 END")
-        # WHERE: single tr_match over the folded haystack + author/journal
-        # EXISTS checks (cheap). Score expr in the SELECT list carries one
-        # placeholder per field, which bind BEFORE the WHERE parameters.
+        # SELECT-list placeholders (score) bind before the WHERE parameters.
         # tr_match folds internally so it gets the raw term; LIKE patterns
         # (score + EXISTS) get the %-wrapped pattern.
         score_params.extend([p] * (len(_SEARCH_SCORES) + 2))
-        where_params.append(term)  # tr_match haystack (raw)
-        where_params.append(p)  # author EXISTS
-        where_params.append(p)  # journal EXISTS
-        clauses.append(f"({' OR '.join(term_clauses)})")
+        if fts_phrase is None:
+            term_clauses = [f"tr_match({haystack}, ?)", author_ex, journal_ex]
+            clauses.append(f"({' OR '.join(term_clauses)})")
+            where_params.append(term)  # tr_match haystack (raw)
+            where_params.append(p)  # author EXISTS
+            where_params.append(p)  # journal EXISTS
+    if fts_phrase is not None:
+        weights = ", ".join(repr(w) for w in _FTS_WEIGHTS)
+        return (
+            "f.articles_fts MATCH ?",
+            f"bm25(articles_fts, {weights})",
+            (),
+            (fts_phrase,),
+        )
     clause = " AND ".join(clauses)
     score_expr = " + ".join(score_parts)
     return clause, score_expr, tuple(score_params), tuple(where_params)
 
 
 def _article_where(
+    conn: sqlite3.Connection,
     search: str = "",
     language: str = "",
     is_oa: str = "",
     year: str = "",
     pdf: str = "",
     article_type: str = "",
-) -> tuple[str, tuple, str | None]:
+) -> tuple[str, tuple, str | None, bool]:
     """WHERE clause + params + relevance score expr (None when no search).
 
     Search covers every harvested field: title, abstract, keywords, DOI,
     journal title/name, authors, article type, publisher, ISSN, volume,
     issue, pages, OAI id, references. Multi-term queries AND terms together.
+
+    Returns (where_sql, params, score_expr, fts_used); fts_used tells
+    callers to join the articles_fts index table.
     """
     clauses: list[str] = []
     params: list[object] = []
     score_expr: str | None = None
-    search_clause, score_expr, _score_params, search_params = _article_search(search)
+    fts_used = False
+    search_clause, score_expr, _score_params, search_params = _article_search(conn, search)
     if search_clause:
         clauses.append(f"({search_clause})")
         params.extend(search_params)
+        fts_used = search_clause.startswith("f.articles_fts")
     if language:
         clauses.append("a.language = ?")
         params.append(language)
@@ -365,7 +426,7 @@ def _article_where(
         clauses.append("tr_fold(a.article_type) = tr_fold(?)")
         params.append(article_type)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return where_sql, tuple(params), score_expr
+    return where_sql, tuple(params), score_expr, fts_used
 
 
 _ARTICLE_SORTS = {
@@ -390,15 +451,25 @@ def search_articles(
 ) -> list[dict]:
     """Page through articles with filters. Ranked by relevance when searching."""
     order_sql = _ARTICLE_SORTS.get(sort, _ARTICLE_SORTS["date_desc"])
-    where, params, _ = _article_where(search, language, is_oa, year, pdf, article_type)
+    where, params, _, fts_used = _article_where(
+        conn, search, language, is_oa, year, pdf, article_type
+    )
     select_sql = _ARTICLE_COLS
     if search.strip():
-        _, score_expr, score_params, _ = _article_search(search)
-        order_sql = "ORDER BY score DESC, a.publication_date DESC, a.id DESC"
+        _, score_expr, score_params, _ = _article_search(conn, search)
+        # bm25 scores are negative (lower = better); the LIKE score is
+        # positive (higher = better).
+        order_sql = (
+            "ORDER BY score ASC, a.publication_date DESC, a.id DESC"
+            if fts_used
+            else "ORDER BY score DESC, a.publication_date DESC, a.id DESC"
+        )
         select_sql = f"{_ARTICLE_COLS}, ({score_expr}) AS score"
         # SELECT-list placeholders (score) bind before WHERE placeholders
         params = (*score_params, *params)
-    return _article_query(conn, select_sql, order_sql, where, params, limit, offset)
+    return _article_query(
+        conn, select_sql, order_sql, where, params, limit, offset, fts=fts_used
+    )
 
 
 def count_articles(
@@ -410,8 +481,13 @@ def count_articles(
     pdf: str = "",
     article_type: str = "",
 ) -> int:
-    where, params, _ = _article_where(search, language, is_oa, year, pdf, article_type)
-    return conn.execute(f"SELECT COUNT(*) FROM articles a {where}", params).fetchone()[0]
+    where, params, _, fts_used = _article_where(
+        conn, search, language, is_oa, year, pdf, article_type
+    )
+    fts_join = "JOIN articles_fts f ON f.rowid = a.id\n" if fts_used else ""
+    return conn.execute(
+        f"SELECT COUNT(*) FROM articles a\n{fts_join}{where}", params
+    ).fetchone()[0]
 
 
 def search_authors(
@@ -452,12 +528,15 @@ def _article_query(
     params: tuple = (),
     limit: int = 50,
     offset: int = 0,
+    fts: bool = False,
 ) -> list[dict]:
+    fts_join = "JOIN articles_fts f ON f.rowid = a.id\n" if fts else ""
     cur = conn.execute(
         f"""
         SELECT {select_sql}
         FROM articles a
         JOIN journals j ON j.id = a.journal_id
+        {fts_join}
         {where}
         {order_sql}
         LIMIT ? OFFSET ?
@@ -484,18 +563,26 @@ def iter_articles(
     materializing the whole result set. Generator: one yield per row.
     """
     order_sql = _ARTICLE_SORTS.get(sort, _ARTICLE_SORTS["date_desc"])
-    where, params, _ = _article_where(search, language, is_oa, year, pdf, article_type)
+    where, params, _, fts_used = _article_where(
+        conn, search, language, is_oa, year, pdf, article_type
+    )
     select_sql = _ARTICLE_COLS
     if search.strip():
-        _, score_expr, score_params, _ = _article_search(search)
-        order_sql = "ORDER BY score DESC, a.publication_date DESC, a.id DESC"
+        _, score_expr, score_params, _ = _article_search(conn, search)
+        order_sql = (
+            "ORDER BY score ASC, a.publication_date DESC, a.id DESC"
+            if fts_used
+            else "ORDER BY score DESC, a.publication_date DESC, a.id DESC"
+        )
         select_sql = f"{_ARTICLE_COLS}, ({score_expr}) AS score"
         params = (*score_params, *params)
+    fts_join = "JOIN articles_fts f ON f.rowid = a.id\n" if fts_used else ""
     cur = conn.execute(
         f"""
         SELECT {select_sql}
         FROM articles a
         JOIN journals j ON j.id = a.journal_id
+        {fts_join}
         {where}
         {order_sql}
         """,

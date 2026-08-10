@@ -42,7 +42,13 @@ from src.crawler import (
     scrape_article_html_metadata,
 )
 from src.exporter import export_all_articles
-from src.storage import init_db, insert_article, insert_journals, update_journal_article_count
+from src.storage import (
+    fts_sync,
+    init_db,
+    insert_article,
+    insert_journals,
+    update_journal_article_count,
+)
 from src.utils import AdaptiveDelay, load_checkpoint, save_checkpoint, setup_logger
 
 CHECKPOINT_PATH = Path("checkpoint.json")
@@ -235,6 +241,8 @@ def _update_article_metadata(conn, oai_id: str, html_meta: dict) -> None:
             f"UPDATE articles SET {', '.join(updates)} WHERE id = ?",
             params,
         )
+        conn.commit()
+        fts_sync(conn, article_id)
         conn.commit()
 
 

@@ -11,7 +11,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from src.storage import init_db, insert_article, insert_journals
+from src.storage import fts_sync, init_db, insert_article, insert_journals
 from src.web import app as web_app
 
 
@@ -52,6 +52,9 @@ def client(tmp_path, monkeypatch):
     conn.execute(
         "UPDATE articles SET abstract='Ankara deprem veri analizi' WHERE title='Makale 1'"
     )
+    # Reindex rows touched by raw SQL (mirrors the enricher's fts_sync call)
+    for aid, in conn.execute("SELECT id FROM articles").fetchall():
+        fts_sync(conn, aid)
     insert_article(
         conn,
         {
